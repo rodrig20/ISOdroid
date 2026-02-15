@@ -1,6 +1,6 @@
 # ISOdroid
 
-ISOdroid is an Android app that turns your device into a bootable USB drive. With root access, it can mount disk image files (like `.iso`) and present them to a computer as a USB storage device—just like a flash drive.precisas
+ISOdroid is an Android app that turns your device into a bootable USB drive. With root access, it can mount disk image files (like `.iso`) and present them to a computer as a USB storage device, just like a flash drive.
 
 ## Features
 
@@ -23,7 +23,7 @@ ISOdroid is an Android app that turns your device into a bootable USB drive. Wit
 2.  **Grant Permissions**: Allow root access when prompted on first launch.
 3.  **Enable USB Gadget**: Toggle "Enable USB Gadget" from the main screen.
 4.  **Add an Image**: Tap the add (+) button and select a disk image (`.iso`, `.img`, etc.).
-5.  **Connect to a PC**: Plug your device into a computer—the system will detect a new USB drive with the mounted image.
+5.  **Connect to a PC**: Plug your device into a computer, the system will detect a new USB drive with the mounted image.
 6.  **Unmount**: To remove the virtual drive, eject it directly from the app.
 
 ## Note
