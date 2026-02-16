@@ -4,8 +4,10 @@
 # Get LUN ID
 LUN_ID=$1
 
+MASS_STORAGE=$(ls /config/usb_gadget/g1/functions/ | grep '^mass_storage' | head -n1)
+
 # Clear the file path to eject the item
-LUN_FILE="/config/usb_gadget/g1/functions/mass_storage.usb0/lun.$LUN_ID/file"
+LUN_FILE="/config/usb_gadget/g1/functions/$MASS_STORAGE/lun.$LUN_ID/file"
 
 if [ -f "$LUN_FILE" ]; then
   echo "" > "$LUN_FILE"

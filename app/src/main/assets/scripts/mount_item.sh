@@ -7,9 +7,11 @@ DISPLAY_NAME=$2
 MODE=$3
 ACTUAL_FILE_PATH=$4
 
+MASS_STORAGE=$(ls /config/usb_gadget/g1/functions/ | grep '^mass_storage' | head -n1)
+
 # Find available LUN
 CONTROLLER=$(getprop sys.usb.controller)
-BASE_PATH='/config/usb_gadget/g1/functions/mass_storage.usb0'
+BASE_PATH="/config/usb_gadget/g1/functions/$MASS_STORAGE"
 SELECTED_LUN=""
 
 MAX_DEVICES_MINUS1=$(($5 - 1))
