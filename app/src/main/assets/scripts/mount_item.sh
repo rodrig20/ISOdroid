@@ -14,10 +14,10 @@ CONTROLLER=$(getprop sys.usb.controller)
 BASE_PATH="/config/usb_gadget/g1/functions/$MASS_STORAGE"
 SELECTED_LUN=""
 
-MAX_DEVICES_MINUS1=$(($5 - 1))
+MAX_DEVICES=$5
 
 i=0
-while [ $i -le $MAX_DEVICES_MINUS1 ]; do
+while [ $i -le $MAX_DEVICES ]; do
     FILE_NODE="$BASE_PATH/lun.$i/file"
     if [ -f "$FILE_NODE" ]; then
         CONTENT=$(cat "$FILE_NODE" 2>/dev/null | tr -d '[:space:]')
