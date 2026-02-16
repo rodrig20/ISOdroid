@@ -4,10 +4,12 @@
 # Get max devices parameter
 MAX_DEVICES=$1
 
+MASS_STORAGE=$(ls /config/usb_gadget/g1/functions/ | grep '^mass_storage' | head -n1)
+
 # Initialize USB gadget
 CONTROLLER=$(getprop sys.usb.controller)
 G_DIR="/config/usb_gadget/g1"
-FUNCTIONS_PATH="$G_DIR/functions/mass_storage.usb0"
+FUNCTIONS_PATH="$G_DIR/functions/$MASS_STORAGE"
 
 echo "" > "$G_DIR/UDC"
 setprop sys.usb.config none
