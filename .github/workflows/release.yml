@@ -31,7 +31,7 @@ jobs:
       - name: Build release APK
         run: ./gradlew assembleRelease
         env:
-          KEYSTORE_FILE: keystore.jks
+          KEYSTORE_FILE: app/keystore.jks
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
