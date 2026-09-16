@@ -1,33 +1,39 @@
 #!/system/bin/sh
-# Disable USB gadget and reset to default USB mode
+# Restore Android USB mode after disabling mass_storage.
 
-MASS_STORAGE=$(ls /config/usb_gadget/g1/functions/ | grep '^mass_storage' | head -n1)
+gadget_locate || exit 1
 
-# Disable current gadget
-CONTROLLER=$(getprop sys.usb.controller)
-echo "" > /config/usb_gadget/g1/UDC
-
-# Clear all LUN file paths
-for LUN_FILE in "/config/usb_gadget/g1/functions/$MASS_STORAGE/lun.*/file"; do
-    if [ -f "$LUN_FILE" ]; then
-        echo -n "" > "$LUN_FILE"
+# Eject all media first so the host flushes cleanly.
+for f in "$FUNC_PATH"/lun*/file; do
+    if [ -f "$f" ]; then
+        echo "" > "$f" 2>/dev/null || true
     fi
 done
 
-# Remove mass storage function link
-if [ -L /config/usb_gadget/g1/configs/b.1/f100 ]; then
-    rm /config/usb_gadget/g1/configs/b.1/f100
+OLD_STATE=$(udc_state)
+unbind_gadget
+poll_until_success 5 udc_state_changed_from "$OLD_STATE" || true
+
+# Remove only our mass_storage link (keep adb/ffs links).
+for l in "$CONFIG_PATH"/*; do
+    if [ -L "$l" ]; then
+        T=$(readlink "$l" 2>/dev/null)
+        case "$T" in
+            *mass_storage*) rm "$l" 2>/dev/null || true ;;
+        esac
+    fi
+done
+rm -f "$CONFIG_PATH/f100" 2>/dev/null || true
+
+# Remove leftover g2 gadget from older versions.
+if [ -d "$CONFIG_ROOT/usb_gadget/g2" ]; then
+    echo "" > "$CONFIG_ROOT/usb_gadget/g2/UDC" 2>/dev/null || true
+    rm -f "$CONFIG_ROOT/usb_gadget/g2/configs/"*/* 2>/dev/null || true
+    rmdir "$CONFIG_ROOT/usb_gadget/g2/functions/mass_storage.0/lun."* 2>/dev/null || true
+    rmdir "$CONFIG_ROOT/usb_gadget/g2/functions/mass_storage.0" 2>/dev/null || true
+    rmdir "$CONFIG_ROOT/usb_gadget/g2/functions" "$CONFIG_ROOT/usb_gadget/g2/configs/b.1" "$CONFIG_ROOT/usb_gadget/g2/configs" "$CONFIG_ROOT/usb_gadget/g2/strings/0x409" "$CONFIG_ROOT/usb_gadget/g2/strings" "$CONFIG_ROOT/usb_gadget/g2" 2>/dev/null || true
 fi
 
-# Remove all additional LUN directories (keep lun.0)
-for LUN_DIR in "/config/usb_gadget/g1/functions/$MASS_STORAGE/lun.*"; do
-    case "$LUN_DIR" in
-        *.0) ;;
-        *) rmdir "$LUN_DIR" 2>/dev/null ;;
-    esac
-done
-
-# Set default USB configuration
-setprop sys.usb.config mtp,adb
-echo "$CONTROLLER" > /config/usb_gadget/g1/UDC
+# Hand the controller back to Android's USB HAL.
+setprop sys.usb.config mtp,adb 2>/dev/null || true
 echo "Success"

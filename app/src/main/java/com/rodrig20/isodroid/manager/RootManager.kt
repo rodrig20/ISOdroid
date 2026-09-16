@@ -2,6 +2,7 @@ package com.rodrig20.isodroid.manager
 
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
@@ -69,30 +70,54 @@ class RootManager(context: Context) {
 
     /**
      * Turns on the USB gadget app by configuring the USB gadget system
-     * Creates the necessary configuration and enables the gadget
+     * Creates the necessary configuration and enables the gadget.
+     * The script verifies the bind stuck; the flow is only set on success
+     * so the UI toggle never shows a phantom "on" state.
+     * @return "Success" or "Error: ..." for UI feedback
      */
-    suspend fun turnOnApp() {
-        if (isRooted) {
-            val maxDevices = getMaxDevices()
+    suspend fun turnOnApp(): String {
+        if (!isRooted) return "Error: Device is not rooted"
+        val maxDevices = getMaxDevices()
 
-            runScriptAsRoot("turn_on_gadget.sh", listOf(maxDevices.toString()))
-            // Update the app enabled state to true
+        // Scripts print a single trailing status line ("Success..." / "Error: ..."); parse the last non-blank line.
+        val result = resultLine(runScriptAsRoot("turn_on_gadget.sh", listOf(maxDevices.toString())))
+        if (result.startsWith("Success")) {
             _isAppEnabled.value = true
+            // "Success" or "Success:waiting-host" (bound, host not enumerated yet).
+            return result
         }
+        // A transient HAL rebind may have settled in our favour; do one read-only re-check before giving up.
+        delay(1000)
+        val lateCheck = resultLine(runScriptAsRoot("check_gadget_status.sh"))
+        if (lateCheck.equals("true", ignoreCase = true)) {
+            _isAppEnabled.value = true
+            return "Success"
+        }
+        _isAppEnabled.value = false
+        return result.ifBlank { "Error: Could not enable USB gadget" }
     }
 
     /**
      * Turns off the USB gadget app by disabling the USB gadget system
      * Cleans up the configuration and resets to default USB mode
+     * @return "Success" or "Error: ..." for UI feedback
      */
     @OptIn(InternalSerializationApi::class)
-    suspend fun turnOffApp() {
-        if (isRooted) {
-            runScriptAsRoot("turn_off_gadget.sh")
-            // Update the app enabled state to false
-            _isAppEnabled.value = false
-        }
+    suspend fun turnOffApp(): String {
+        if (!isRooted) return "Error: Device is not rooted"
+        val result = resultLine(runScriptAsRoot("turn_off_gadget.sh"))
+        // Always reflect off locally; report script errors to the UI.
+        _isAppEnabled.value = false
+        return result.ifBlank { "Success" }
     }
+
+    /**
+     * Extracts the trailing status line from a script's merged stdout+stderr.
+     * Every script prints its result ("Success..." / "Error: ..." / "true" /
+     * "false" / "VALID_...") as the last non-blank line.
+     */
+    fun resultLine(output: String): String =
+        output.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.lastOrNull() ?: ""
 
     /**
      * Mounts a file (ISO or disk image) to a LUN for USB mass storage
@@ -110,7 +135,7 @@ class RootManager(context: Context) {
         val actualFilePath = if (mode.equals("Disk", ignoreCase = true)) "$filePath/$displayName.img" else filePath
         val maxDevices = getMaxDevices()
 
-        return runScriptAsRoot("mount_item.sh", listOf(filePath, encodedName, mode, actualFilePath, (maxDevices - 1).toString()))
+        return resultLine(runScriptAsRoot("mount_item.sh", listOf(filePath, encodedName, mode, actualFilePath, (maxDevices - 1).toString())))
     }
 
     /**
@@ -140,7 +165,22 @@ class RootManager(context: Context) {
         if (!isRooted) return "Error: Device is not rooted"
         val cleanLunId = lunId.trim()
 
-        return runScriptAsRoot("eject_item.sh", listOf(cleanLunId))
+        return resultLine(runScriptAsRoot("eject_item.sh", listOf(cleanLunId)))
+    }
+
+    /**
+     * Force-ejects one LUN via the kernel's forced_eject node, bypassing the
+     * host's PREVENT-ALLOW MEDIUM REMOVAL lock. Per-LUN: other LUNs keep
+     * serving. Like yanking a pen without safe-remove, host-cached writes
+     * for THIS lun may be lost.
+     * @param lunId ID of the LUN to force-eject
+     * @return Result string indicating success or error
+     */
+    suspend fun forceEjectItem(lunId: String): String {
+        if (!isRooted) return "Error: Device is not rooted"
+        val cleanLunId = lunId.trim()
+
+        return resultLine(runScriptAsRoot("force_eject_item.sh", listOf(cleanLunId)))
     }
 
     /**
@@ -265,9 +305,21 @@ class RootManager(context: Context) {
             // Read the script content from assets
             val scriptContent = appContext.assets.open("scripts/$scriptName").bufferedReader().readText()
 
+            // Inject shared gadget helpers to avoid duplicated shell logic.
+            val fullContent = if (scriptName == "gadget_common.sh") {
+                scriptContent
+            } else {
+                val common = try {
+                    appContext.assets.open("scripts/gadget_common.sh").bufferedReader().readText()
+                } catch (_: Exception) {
+                    ""
+                }
+                common + "\n" + scriptContent
+            }
+
             // Create a temporary file for the script
             val tempScript = java.io.File.createTempFile("temp_script_", ".sh", appContext.cacheDir)
-            tempScript.writeText(scriptContent)
+            tempScript.writeText(fullContent)
             tempScript.setExecutable(true)
 
             // Prepare arguments for the script

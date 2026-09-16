@@ -16,9 +16,8 @@ ISOdroid is an Android app that turns your device into a bootable USB drive. Wit
 
 ## Requirements
 
-- **Device & Kernel**: Tested on the **Redmi Note 12 Pro 5G** with the custom kernel: [moonwake_kernel_xiaomi_ruby](https://github.com/rodrig20/moonwake_kernel_xiaomi_ruby).
+- **Device & Kernel**: Tested on the **Redmi Note 12 Pro 5G** with the kernel: [kernel_xiaomi_mt6877](https://github.com/rajdeep-3305/kernel_xiaomi_mt6877). Should work on any AOSP kernel with ConfigFS (`CONFIG_USB_CONFIGFS_MASS_STORAGE`) and a writable `/config/usb_gadget` or `/sys/kernel/config/usb_gadget` (no kernel patch required).
 - **Root Access Methods**: Successfully tested with **Sukisu**, but should also work with **Magisk**, **KernelSU**, or other root solutions.
-- **Kernel Patch**: This kernel includes a modification in `gadget_dev_desc_UDC_store`. Instead of returning a "device busy" error when creating a new gadget, it automatically disables the previous gadget and activates the new one. Check your kernel if you want the same behavior.
 
 ## How to Use
 

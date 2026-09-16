@@ -1,32 +1,62 @@
 #!/system/bin/sh
-# Configure and enable USB gadget for mass storage
+# Configure and enable USB gadget for mass storage (single blink).
 
-# Get max devices parameter
 MAX_DEVICES=$1
+case "$MAX_DEVICES" in
+    ''|*[!0-9]*) MAX_DEVICES=1 ;;
+esac
+if [ "$MAX_DEVICES" -lt 1 ]; then MAX_DEVICES=1; fi
 
-MASS_STORAGE=$(ls /config/usb_gadget/g1/functions/ | grep '^mass_storage' | head -n1)
+gadget_locate || exit 1
 
-# Initialize USB gadget
-CONTROLLER=$(getprop sys.usb.controller)
-G_DIR="/config/usb_gadget/g1"
-FUNCTIONS_PATH="$G_DIR/functions/$MASS_STORAGE"
+# Quiesce Android USB HAL so it does not re-bind mid-setup (main EBUSY source).
+setprop sys.usb.config none 2>/dev/null || true
+OLD_STATE=$(udc_state)
+if ! gadget_is_unbound; then
+    unbind_gadget
+    poll_until_success 5 udc_state_changed_from "$OLD_STATE" || true
+fi
 
-echo "" > "$G_DIR/UDC"
-setprop sys.usb.config none
+# Remove only our mass_storage link (keep adb/ffs links intact).
+for l in "$CONFIG_PATH"/*; do
+    if [ -L "$l" ]; then
+        T=$(readlink "$l" 2>/dev/null)
+        case "$T" in
+            *mass_storage*) rm "$l" 2>/dev/null || true ;;
+        esac
+    fi
+done
+rm -f "$CONFIG_PATH/f100" 2>/dev/null || true
 
-# Set up mass storage functions
-rm "$G_DIR/configs/b.1/f100" 2>/dev/null
-rm -rf "$FUNCTIONS_PATH" 2>/dev/null
-mkdir -p "$FUNCTIONS_PATH"
-
-# Create LUNs for each device
+# Pre-create empty LUNs before bind to avoid EBUSY on stock kernels
+if ! gadget_ensure_function; then
+    echo "Error: Could not set up mass_storage (toggle off and retry)"
+    exit 1
+fi
 i=0
-while [ $i -lt $MAX_DEVICES ]; do
-    mkdir -p "$FUNCTIONS_PATH/lun.$i"
-    echo 1 > "$FUNCTIONS_PATH/lun.$i/removable"
+while [ $i -lt "$MAX_DEVICES" ]; do
+    LUN_DIR="$FUNC_PATH/lun.$i"
+    mkdir -p "$LUN_DIR" 2>/dev/null || true
+    echo 1 > "$LUN_DIR/removable" 2>/dev/null || true
     i=$((i + 1))
 done
 
-# Enable the gadget
-ln -s "$FUNCTIONS_PATH" "$G_DIR/configs/b.1/f100"
-echo "$CONTROLLER" > "$G_DIR/UDC"
+ln -s "$FUNC_PATH" "$CONFIG_PATH/$FUNC_NAME" 2>/dev/null || true
+
+if ! bind_gadget; then
+    echo "Error: Could not bind USB controller (toggle off and retry)"
+    exit 1
+fi
+
+# Wait for host to configure us
+await_live_gadget 15
+RC=$?
+if [ "$RC" -eq 0 ]; then
+    echo "Success"
+elif [ "$RC" -eq 2 ]; then
+    echo "Success:waiting-host"
+else
+    echo "Error: Bind did not stick (unplug cable, enable, replug)"
+    exit 1
+fi
+exit 0

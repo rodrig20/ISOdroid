@@ -31,10 +31,14 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -168,34 +172,56 @@ fun App() {
         NotRootedScreen()
     } else {
         // Render appropriate screen based on navigation state
+        // Shared snackbar state so enable/disable errors surface in the UI instead of failing silently.
+        val snackbarHostState = remember { SnackbarHostState() }
+        // While a turn on/off script runs, lock the toggle with a
+        // progress bar so taps feel answered immediately.
+        var isToggling by remember { mutableStateOf(false) }
         when (currentScreen) {
             is Screen.Home -> HomeScreen(
                 isAppEnabled = isAppEnabled,
+                snackbarHostState = snackbarHostState,
+                isToggling = isToggling,
                 onAppEnabledChange = { enabled ->
                     // Handle app enable/disable actions
+                    if (isToggling) return@HomeScreen
+                    isToggling = true
                     coroutineScope.launch {
-                        if (enabled) {
-                            rootManager.turnOnApp()
-                        } else {
-                            rootManager.turnOffApp()
-
-                            // Eject all active disk items when disabling the app
-                            val diskItems = diskItemRepository.diskItems.first()
-                            val itemsToEject = mutableListOf<String>()
-
-                            for (item in diskItems) {
-                                if (item.isActive && item.lunId != null) {
-                                    diskItemRepository.updateDiskItem(
-                                        item.copy(isActive = false, lunId = null)
+                        try {
+                            if (enabled) {
+                                val result = rootManager.turnOnApp()
+                                if (result.startsWith("Error")) {
+                                    snackbarHostState.showSnackbar(result)
+                                } else if (result.contains("waiting-host")) {
+                                    snackbarHostState.showSnackbar(
+                                        "Gadget on, but the PC has not enumerated it yet (plug the cable or rescan)"
                                     )
-                                    itemsToEject.add(item.lunId)
+                                }
+                            } else {
+                                val result = rootManager.turnOffApp()
+                                if (result.startsWith("Error")) {
+                                    snackbarHostState.showSnackbar(result)
+                                }
+
+                                // Eject all active disk items when disabling the app
+                                val diskItems = diskItemRepository.diskItems.first()
+                                val itemsToEject = mutableListOf<String>()
+
+                                for (item in diskItems) {
+                                    if (item.isActive && item.lunId != null) {
+                                        diskItemRepository.updateDiskItem(
+                                            item.copy(isActive = false, lunId = null)
+                                        )
+                                        itemsToEject.add(item.lunId)
+                                    }
+                                }
+
+                                for (lunId in itemsToEject) {
+                                    rootManager.ejectItem(lunId)
                                 }
                             }
-
-                            for (lunId in itemsToEject) {
-                                rootManager.ejectItem(lunId)
-                            }
-
+                        } finally {
+                            isToggling = false
                         }
                     }
                 },
@@ -242,31 +268,35 @@ fun NotRootedScreen() {
 fun AppEnablerCard(
     isAppEnabled: Boolean, // Current state of the USB gadget
     onCheckedChange: (Boolean) -> Unit, // Callback for when the switch is toggled
-    isRooted: Boolean // Whether the device has root access
+    isRooted: Boolean, // Whether the device has root access
+    isBusy: Boolean = false // A script is running; switch locks with feedback
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Enable USB Gadget",
-                    style = MaterialTheme.typography.titleLarge
-                )
-                Text(
-                    text = "Allow the app to control the USB gadget",
-                    style = MaterialTheme.typography.bodyMedium
+        Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Enable USB Gadget",
+                        style = MaterialTheme.typography.titleLarge
+                    )
+                    Text(
+                        text = if (isBusy) "Applying USB change..." else "Allow the app to control the USB gadget",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                Switch(
+                    checked = isAppEnabled,
+                    onCheckedChange = onCheckedChange,
+                    enabled = isRooted && !isBusy
                 )
             }
-            Switch(
-                checked = isAppEnabled,
-                onCheckedChange = onCheckedChange,
-                enabled = isRooted
-            )
+            if (isBusy) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth().padding(top = 12.dp))
+            }
         }
     }
 }
@@ -281,7 +311,9 @@ fun HomeScreen(
     isAppEnabled: Boolean, // Whether the USB gadget is currently enabled
     onAppEnabledChange: (Boolean) -> Unit, // Callback for changing the USB gadget state
     rootManager: RootManager, // Manager for root operations
-    onNavigateToSettings: () -> Unit // Callback for navigating to settings
+    onNavigateToSettings: () -> Unit, // Callback for navigating to settings
+    snackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
+    isToggling: Boolean = false // A turn on/off script is running
 ) {
     val context = LocalContext.current
     val diskItemRepository = remember { DiskItemRepository(context) }
@@ -301,6 +333,7 @@ fun HomeScreen(
                 }
             )
         },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         floatingActionButton = {
             FloatingActionButton(onClick = {
                 if (isAppEnabled) {
@@ -321,7 +354,8 @@ fun HomeScreen(
                 AppEnablerCard(
                     isAppEnabled = isAppEnabled,
                     onCheckedChange = onAppEnabledChange,
-                    isRooted = rootManager.isRooted
+                    isRooted = rootManager.isRooted,
+                    isBusy = isToggling
                 )
             }
             // Display all disk items in the list
@@ -345,16 +379,39 @@ fun HomeScreen(
                                     val lunId = result.substring("Success:".length)
                                     updatedItem = item.copy(isActive = true, lunId = lunId)
                                 } else {
+                                    snackbarHostState.showSnackbar(
+                                        result.ifBlank { "Error: Could not mount item" }
+                                    )
                                     return@launch
                                 }
                             } else {
                                 // Eject the item if the new state is inactive
                                 updatedItem = if (item.lunId != null) {
-                                    val result = rootManager.ejectItem(item.lunId)
+                                    val lunId = item.lunId
+                                    val result = rootManager.ejectItem(lunId)
                                     if (result.startsWith("Success:")) {
                                         item.copy(isActive = false, lunId = null)
                                     } else {
-                                        return@launch
+                                        // Host holds the LUN (PREVENT-ALLOW MEDIUM
+                                        // REMOVAL): offer a per-LUN force eject that
+                                        // leaves the other LUNs serving.
+                                        val action = snackbarHostState.showSnackbar(
+                                            message = result.ifBlank { "Error: Could not eject item" },
+                                            actionLabel = "Force"
+                                        )
+                                        if (action == SnackbarResult.ActionPerformed) {
+                                            val forceResult = rootManager.forceEjectItem(lunId)
+                                            if (forceResult.startsWith("Success:")) {
+                                                item.copy(isActive = false, lunId = null)
+                                            } else {
+                                                snackbarHostState.showSnackbar(
+                                                    forceResult.ifBlank { "Error: Force eject failed" }
+                                                )
+                                                return@launch
+                                            }
+                                        } else {
+                                            return@launch
+                                        }
                                     }
                                 } else {
                                     item.copy(isActive = false, lunId = null)

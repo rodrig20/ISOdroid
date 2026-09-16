@@ -1,13 +1,12 @@
 #!/system/bin/sh
-# Check USB gadget status
+# Report whether our mass_storage gadget is currently bound.
 
-# Get USB controller info
-UDC_NAME=$(getprop sys.usb.controller)
-UDC_STATE=$(cat /config/usb_gadget/g1/UDC 2>/dev/null)
+# Initialize the gadget paths before checking the live state.
+gadget_locate || { echo "false"; exit 0; }
 
-# Check if gadget is active and return status
-if [ -L /config/usb_gadget/g1/configs/b.1/f100 ] && [ "$UDC_STATE" = "$UDC_NAME" ]; then
-   echo "true"
+# The gadget is considered active only when the UDC is bound and the mass_storage link exists.
+if gadget_is_bound && our_link_present; then
+    echo "true"
 else
-   echo "false"
+    echo "false"
 fi
