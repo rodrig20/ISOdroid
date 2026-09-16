@@ -1,33 +1,29 @@
 #!/system/bin/sh
-# Disable USB gadget and reset to default USB mode
+# Restore Android USB mode after disabling mass_storage.
 
-MASS_STORAGE=$(ls /config/usb_gadget/g1/functions/ | grep '^mass_storage' | head -n1)
+gadget_init || exit 1
 
-# Disable current gadget
-CONTROLLER=$(getprop sys.usb.controller)
-echo "" > /config/usb_gadget/g1/UDC
+unbind_gadget
+sleep 1
 
-# Clear all LUN file paths
-for LUN_FILE in "/config/usb_gadget/g1/functions/$MASS_STORAGE/lun.*/file"; do
-    if [ -f "$LUN_FILE" ]; then
-        echo -n "" > "$LUN_FILE"
+# Eject all media first so the host flushes cleanly.
+for f in "$FUNC_PATH"/lun*/file; do
+    if [ -f "$f" ]; then
+        echo "" > "$f" 2>/dev/null || true
     fi
 done
 
-# Remove mass storage function link
-if [ -L /config/usb_gadget/g1/configs/b.1/f100 ]; then
-    rm /config/usb_gadget/g1/configs/b.1/f100
-fi
-
-# Remove all additional LUN directories (keep lun.0)
-for LUN_DIR in "/config/usb_gadget/g1/functions/$MASS_STORAGE/lun.*"; do
-    case "$LUN_DIR" in
-        *.0) ;;
-        *) rmdir "$LUN_DIR" 2>/dev/null ;;
-    esac
+# Remove only our mass_storage link (keep adb/ffs links).
+for l in "$CONFIG_PATH"/*; do
+    if [ -L "$l" ]; then
+        T=$(readlink "$l" 2>/dev/null)
+        case "$T" in
+            *mass_storage*) rm "$l" 2>/dev/null || true ;;
+        esac
+    fi
 done
+rm -f "$CONFIG_PATH/f100" 2>/dev/null || true
 
-# Set default USB configuration
-setprop sys.usb.config mtp,adb
-echo "$CONTROLLER" > /config/usb_gadget/g1/UDC
+# Hand the controller back to Android's USB HAL.
+setprop sys.usb.config mtp,adb 2>/dev/null || true
 echo "Success"

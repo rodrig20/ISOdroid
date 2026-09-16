@@ -1,41 +1,44 @@
 #!/system/bin/sh
-# Mount a file (ISO/disk image) to a LUN for USB mass storage
+# Mount a file (ISO/disk image) to a free LUN without re-enumerating the USB gadget
 
-# Get input parameters
 FILE_PATH=$1
 DISPLAY_NAME=$2
 MODE=$3
 ACTUAL_FILE_PATH=$4
+MAX_INDEX=$5
 
-MASS_STORAGE=$(ls /config/usb_gadget/g1/functions/ | grep '^mass_storage' | head -n1)
+case "$MAX_INDEX" in
+    ''|*[!0-9]*) MAX_INDEX=0 ;;
+esac
 
-# Find available LUN
-CONTROLLER=$(getprop sys.usb.controller)
-BASE_PATH="/config/usb_gadget/g1/functions/$MASS_STORAGE"
-SELECTED_LUN=""
+gadget_init || exit 1
 
-MAX_DEVICES=$5
-
-i=0
-while [ $i -le $MAX_DEVICES ]; do
-    FILE_NODE="$BASE_PATH/lun.$i/file"
-    if [ -f "$FILE_NODE" ]; then
-        CONTENT=$(cat "$FILE_NODE" 2>/dev/null | tr -d '[:space:]')
-        if [ -z "$CONTENT" ]; then
-            SELECTED_LUN=$i
-            break
-        fi
-    fi
-    i=$((i + 1))
-done
-
-if [ -z "$SELECTED_LUN" ]; then
-  echo "Error: No free slots"
-  exit 1
+if [ ! -d "$FUNC_PATH" ]; then
+    echo "Error: Gadget is off, enable USB gadget first"
+    exit 1
 fi
 
-# Configure LUN based on mode (read-only for ISO, read-write for Disk)
-TARGET="$BASE_PATH/lun.$SELECTED_LUN"
+# The real backing file (Disk mode: folder/name.img already resolved by app).
+if [ -n "$ACTUAL_FILE_PATH" ]; then
+    BACKING="$ACTUAL_FILE_PATH"
+else
+    BACKING="$FILE_PATH"
+fi
+if [ ! -f "$BACKING" ] && [ ! -b "$BACKING" ]; then
+    echo "Error: Backing file not found: $BACKING"
+    exit 1
+fi
+
+SELECTED_LUN=$(find_free_lun "$MAX_INDEX" 2>/dev/null)
+if [ -z "$SELECTED_LUN" ]; then
+    echo "Error: No free slots"
+    exit 1
+fi
+TARGET=$(lun_dir_for "$SELECTED_LUN")
+FILE_NODE="$TARGET/file"
+
+# Ensure the LUN is empty before touching flags.
+echo "" > "$FILE_NODE" 2>/dev/null || true
 
 if [ "$MODE" = "Disk" ] || [ "$MODE" = "disk" ]; then
     RO_VALUE=0
@@ -43,10 +46,14 @@ else
     RO_VALUE=1
 fi
 
-# Set LUN configuration
-echo $RO_VALUE > "$TARGET/ro"
-echo 1 > "$TARGET/removable"
-printf '%s' "$DISPLAY_NAME" | cut -c1-16 > "$TARGET/inquiry_string"
-echo "$ACTUAL_FILE_PATH" > "$TARGET/file"
+echo "$RO_VALUE" > "$TARGET/ro" 2>/dev/null || true
+echo 1 > "$TARGET/removable" 2>/dev/null || true
+# inquiry_string is cosmetic (never fail the mount if the kernel refuses it bound).
+printf '%s' "$DISPLAY_NAME" 2>/dev/null | cut -c1-16 > "$TARGET/inquiry_string" 2>/dev/null || true
 
-echo "Success:$SELECTED_LUN"
+if echo "$BACKING" > "$FILE_NODE" 2>/dev/null; then
+    echo "Success:$SELECTED_LUN"
+else
+    echo "Error: Host locked this LUN (eject/unmount on the PC first, then retry)"
+    exit 1
+fi

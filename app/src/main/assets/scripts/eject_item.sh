@@ -1,17 +1,27 @@
 #!/system/bin/sh
-# Eject a mounted item by clearing its file path
+# Eject a LUN WITHOUT touching UDC/configs.
 
-# Get LUN ID
 LUN_ID=$1
-
-MASS_STORAGE=$(ls /config/usb_gadget/g1/functions/ | grep '^mass_storage' | head -n1)
-
 # Clear the file path to eject the item
-LUN_FILE="/config/usb_gadget/g1/functions/$MASS_STORAGE/lun.$LUN_ID/file"
+CLEAN_ID=$(printf '%s' "$LUN_ID" | tr -cd '0-9')
+if [ -z "$CLEAN_ID" ]; then
+    echo "Error: Invalid LUN id"
+    exit 1
+fi
 
-if [ -f "$LUN_FILE" ]; then
-  echo "" > "$LUN_FILE"
-  echo "Success:$LUN_ID"
+gadget_init || exit 1
+
+TARGET=$(lun_dir_for "$CLEAN_ID")
+LUN_FILE="$TARGET/file"
+
+if [ ! -f "$LUN_FILE" ]; then
+    echo "Error: LUN not found"
+    exit 1
+fi
+
+if echo "" > "$LUN_FILE" 2>/dev/null; then
+    echo "Success:$CLEAN_ID"
 else
-  echo "Error: LUN not found"
+    echo "Error: Host locked this LUN (eject/unmount on the PC first, then retry)"
+    exit 1
 fi

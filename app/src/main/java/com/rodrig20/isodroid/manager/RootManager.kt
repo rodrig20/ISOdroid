@@ -265,9 +265,21 @@ class RootManager(context: Context) {
             // Read the script content from assets
             val scriptContent = appContext.assets.open("scripts/$scriptName").bufferedReader().readText()
 
+            // Inject shared gadget helpers to avoid duplicated shell logic.
+            val fullContent = if (scriptName == "gadget_common.sh") {
+                scriptContent
+            } else {
+                val common = try {
+                    appContext.assets.open("scripts/gadget_common.sh").bufferedReader().readText()
+                } catch (_: Exception) {
+                    ""
+                }
+                common + "\n" + scriptContent
+            }
+
             // Create a temporary file for the script
             val tempScript = java.io.File.createTempFile("temp_script_", ".sh", appContext.cacheDir)
-            tempScript.writeText(scriptContent)
+            tempScript.writeText(fullContent)
             tempScript.setExecutable(true)
 
             // Prepare arguments for the script

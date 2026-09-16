@@ -1,32 +1,45 @@
 #!/system/bin/sh
-# Configure and enable USB gadget for mass storage
+# Configure and enable USB gadget for mass storage (single blink).
 
-# Get max devices parameter
 MAX_DEVICES=$1
+case "$MAX_DEVICES" in
+    ''|*[!0-9]*) MAX_DEVICES=1 ;;
+esac
+if [ "$MAX_DEVICES" -lt 1 ]; then MAX_DEVICES=1; fi
 
-MASS_STORAGE=$(ls /config/usb_gadget/g1/functions/ | grep '^mass_storage' | head -n1)
+gadget_init || exit 1
 
-# Initialize USB gadget
-CONTROLLER=$(getprop sys.usb.controller)
-G_DIR="/config/usb_gadget/g1"
-FUNCTIONS_PATH="$G_DIR/functions/$MASS_STORAGE"
+# Quiesce Android USB HAL so it does not re-bind mid-setup (main EBUSY source).
+setprop sys.usb.config none 2>/dev/null || true
+unbind_gadget
+sleep 1
 
-echo "" > "$G_DIR/UDC"
-setprop sys.usb.config none
+mkdir -p "$FUNC_PATH" "$CONFIG_PATH" 2>/dev/null || true
 
-# Set up mass storage functions
-rm "$G_DIR/configs/b.1/f100" 2>/dev/null
-rm -rf "$FUNCTIONS_PATH" 2>/dev/null
-mkdir -p "$FUNCTIONS_PATH"
+# Remove only our mass_storage link (keep adb/ffs links intact).
+for l in "$CONFIG_PATH"/*; do
+    if [ -L "$l" ]; then
+        T=$(readlink "$l" 2>/dev/null)
+        case "$T" in
+            *mass_storage*) rm "$l" 2>/dev/null || true ;;
+        esac
+    fi
+done
+rm -f "$CONFIG_PATH/f100" 2>/dev/null || true
 
-# Create LUNs for each device
+# Pre-create empty LUNs before bind to avoid EBUSY on stock kernels
 i=0
-while [ $i -lt $MAX_DEVICES ]; do
-    mkdir -p "$FUNCTIONS_PATH/lun.$i"
-    echo 1 > "$FUNCTIONS_PATH/lun.$i/removable"
+while [ $i -lt "$MAX_DEVICES" ]; do
+    LUN_DIR="$FUNC_PATH/lun.$i"
+    mkdir -p "$LUN_DIR" 2>/dev/null || true
+    echo 1 > "$LUN_DIR/removable" 2>/dev/null || true
     i=$((i + 1))
 done
 
-# Enable the gadget
-ln -s "$FUNCTIONS_PATH" "$G_DIR/configs/b.1/f100"
-echo "$CONTROLLER" > "$G_DIR/UDC"
+ln -s "$FUNC_PATH" "$CONFIG_PATH/f100" 2>/dev/null || true
+
+if bind_gadget; then
+    echo "Success"
+else
+    exit 1
+fi
