@@ -11,7 +11,13 @@ case "$MAX_INDEX" in
     ''|*[!0-9]*) MAX_INDEX=0 ;;
 esac
 
-gadget_init || exit 1
+gadget_locate || exit 1
+
+# Never configure LUNs on an unbound gadget (invisible to the host).
+if ! gadget_is_bound; then
+    echo "Error: Gadget is not bound, toggle USB gadget off and on again"
+    exit 1
+fi
 
 if [ ! -d "$FUNC_PATH" ]; then
     echo "Error: Gadget is off, enable USB gadget first"

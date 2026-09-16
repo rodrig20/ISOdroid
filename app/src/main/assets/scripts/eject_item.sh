@@ -9,7 +9,13 @@ if [ -z "$CLEAN_ID" ]; then
     exit 1
 fi
 
-gadget_init || exit 1
+gadget_locate || exit 1
+
+# Ejecting on an unbound gadget is a no-op for the host.
+if ! gadget_is_bound; then
+    echo "Error: Gadget is not bound, toggle USB gadget off and on again"
+    exit 1
+fi
 
 TARGET=$(lun_dir_for "$CLEAN_ID")
 LUN_FILE="$TARGET/file"

@@ -1,7 +1,16 @@
 #!/system/bin/sh
+#!/system/bin/sh
 # Shared helpers for ISOdroid USB gadget scripts.
 # This file is prepended by RootManager before every script, so do NOT
 # execute it directly.
+#
+# Hard-won rules:
+# - SINGLE bind/unbind each, NEVER retry loops: hammering UDC writes races
+#   the HAL and panics the kernel (use-after-free in android_work -> reboot).
+# - Operate INSIDE Android's g1: creating a g2 gadget fails with ENOMEM
+#   while g1 holds the controller, and the HAL anchors ADB there anyway.
+# - Status is always the LAST stdout line: RootManager merges stderr after
+#   stdout, so keep helper stderr silent (2>/dev/null) or parsing breaks.
 
 # Log a gadget-related message to stderr.
 gadget_log() {
@@ -42,12 +51,6 @@ detect_config_root() {
         CONFIG_ROOT=/config
         return 0
     fi
-    # Last resort: create the tree; kernel creates it on mkdir if supported.
-    mkdir -p /config/usb_gadget >/dev/null 2>&1 || true
-    if [ -d /config/usb_gadget ]; then
-        CONFIG_ROOT=/config
-        return 0
-    fi
     return 1
 }
 
@@ -61,7 +64,7 @@ detect_udc_name() {
 }
 
 # Initialize the USB gadget paths and metadata needed for all later operations.
-gadget_init() {
+gadget_locate() {
     ensure_modules
     ensure_configfs
     if ! detect_config_root; then
@@ -70,30 +73,47 @@ gadget_init() {
     fi
 
     # Reuse existing gadget if the ROM already created one, else g1.
-    EXISTING=$(ls -1 "$CONFIG_ROOT/usb_gadget" 2>/dev/null | head -n1 | tr -d '[:space:]')
-    if [ -n "$EXISTING" ]; then
-        G_DIR="$CONFIG_ROOT/usb_gadget/$EXISTING"
-    else
+    if [ -d "$CONFIG_ROOT/usb_gadget/g1" ]; then
         G_DIR="$CONFIG_ROOT/usb_gadget/g1"
-        mkdir -p "$G_DIR" >/dev/null 2>&1 || true
+    else
+        FIRST=$(ls -1 "$CONFIG_ROOT/usb_gadget" 2>/dev/null | head -n1 | tr -d '[:space:]')
+        if [ -z "$FIRST" ]; then
+            echo "Error: No USB gadget found"
+            return 1
+        fi
+        G_DIR="$CONFIG_ROOT/usb_gadget/$FIRST"
     fi
 
     # Resolve mass_storage function (do NOT create here; turn_on owns that).
-    MASS_STORAGE=$(ls -1 "$G_DIR/functions" 2>/dev/null | grep '^mass_storage' | head -n1 | tr -d '[:space:]')
-    if [ -z "$MASS_STORAGE" ]; then
-        MASS_STORAGE="mass_storage.0"
+    EXISTING_FUNC=$(ls -1 "$G_DIR/functions" 2>/dev/null | grep '^mass_storage' | head -n1 | tr -d '[:space:]')
+    if [ -n "$EXISTING_FUNC" ]; then
+        FUNC_NAME="$EXISTING_FUNC"
+    else
+        FUNC_NAME="mass_storage.0"
     fi
-    FUNC_PATH="$G_DIR/functions/$MASS_STORAGE"
+    FUNC_PATH="$G_DIR/functions/$FUNC_NAME"
 
     # Resolve config (b.1 on most devices, first child otherwise).
-    CONFIG_NAME=$(ls -1 "$G_DIR/configs" 2>/dev/null | head -n1 | tr -d '[:space:]')
-    if [ -z "$CONFIG_NAME" ]; then
+    EXISTING_CFG=$(ls -1 "$G_DIR/configs" 2>/dev/null | head -n1 | tr -d '[:space:]')
+    if [ -n "$EXISTING_CFG" ]; then
+        CONFIG_NAME="$EXISTING_CFG"
+    else
         CONFIG_NAME="b.1"
     fi
     CONFIG_PATH="$G_DIR/configs/$CONFIG_NAME"
 
     UDC_FILE="$G_DIR/UDC"
     detect_udc_name
+    return 0
+}
+
+# Create our mass_storage instance (call only while unbound).
+gadget_ensure_function() {
+    mkdir -p "$FUNC_PATH" >/dev/null 2>&1 || true
+    if [ ! -d "$FUNC_PATH" ]; then
+        echo "Error: Cannot set up mass_storage (unbind first)"
+        return 1
+    fi
     return 0
 }
 
@@ -104,21 +124,89 @@ unbind_gadget() {
     fi
 }
 
-# Retry the UDC bind to handle temporary Android USB HAL re-bind races.
+# Check if the gadget is currently bound to the UDC.
+gadget_is_bound() {
+    if [ -z "$UDC_NAME" ]; then return 1; fi
+    CUR=$(cat "$UDC_FILE" 2>/dev/null | tr -d '[:space:]')
+    [ -n "$CUR" ] && [ "$CUR" = "$UDC_NAME" ]
+}
+
+# Check if the gadget is currently unbound.
+gadget_is_unbound() {
+    CUR=$(cat "$UDC_FILE" 2>/dev/null | tr -d '[:space:]')
+    [ -z "$CUR" ]
+}
+
+# Read the raw UDC driver state.
+udc_state() {
+    if [ -z "$UDC_NAME" ]; then return 1; fi
+    cat "/sys/class/udc/$UDC_NAME/state" 2>/dev/null | tr -d '[:space:]'
+}
+
+# Check if the UDC state matches the expected value.
+udc_state_is() {
+    CUR=$(udc_state) || return 1
+    [ "$CUR" = "$1" ]
+}
+
+# Check if the UDC state changed from a previous value.
+udc_state_changed_from() {
+    CUR=$(udc_state) || return 1
+    [ "$CUR" != "$1" ]
+}
+
+# Poll a check function until it succeeds or the timeout runs out.
+poll_until_success() {
+    TENTHS=$1; shift
+    while [ "$TENTHS" -gt 0 ]; do
+        if "$@" >/dev/null 2>&1; then return 0; fi
+        sleep 0.1 2>/dev/null || sleep 1
+        TENTHS=$((TENTHS - 1))
+    done
+    return 1
+}
+
+# Wait for a live bind (bound + our link present + host configured).
+await_live_gadget() {
+    TENTHS=$1
+    BAD=0
+    while [ "$TENTHS" -gt 0 ]; do
+        if gadget_is_bound && our_link_present; then
+            BAD=0
+            if [ "$(udc_state)" = "configured" ]; then
+                return 0
+            fi
+        else
+            BAD=$((BAD + 1))
+            if [ "$BAD" -ge 3 ]; then
+                return 1
+            fi
+        fi
+        sleep 0.1 2>/dev/null || sleep 1
+        TENTHS=$((TENTHS - 1))
+    done
+    if gadget_is_bound && our_link_present; then
+        return 2
+    fi
+    return 1
+}
+
+# Check if our mass_storage link is present in the config.
+our_link_present() {
+    [ -L "$CONFIG_PATH/$FUNC_NAME" ] || [ -L "$CONFIG_PATH/f100" ] || [ -L "$CONFIG_PATH/mass_storage" ]
+}
+
+# Bind the UDC once and verify it stuck.
 bind_gadget() {
     if [ -z "$UDC_NAME" ]; then
         echo "Error: No UDC controller found"
         return 1
     fi
-    i=0
-    while [ $i -lt 5 ]; do
-        if echo "$UDC_NAME" > "$UDC_FILE" 2>/dev/null; then
-            return 0
-        fi
-        sleep 1
-        i=$((i + 1))
-    done
-    echo "Error: Cannot bind UDC $UDC_NAME (device busy, retry later)"
+    echo "$UDC_NAME" > "$UDC_FILE" 2>/dev/null || true
+    if gadget_is_bound; then
+        return 0
+    fi
+    echo "Error: Cannot bind UDC $UDC_NAME (controller busy)"
     return 1
 }
 

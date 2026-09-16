@@ -7,14 +7,15 @@ case "$MAX_DEVICES" in
 esac
 if [ "$MAX_DEVICES" -lt 1 ]; then MAX_DEVICES=1; fi
 
-gadget_init || exit 1
+gadget_locate || exit 1
 
 # Quiesce Android USB HAL so it does not re-bind mid-setup (main EBUSY source).
 setprop sys.usb.config none 2>/dev/null || true
-unbind_gadget
-sleep 1
-
-mkdir -p "$FUNC_PATH" "$CONFIG_PATH" 2>/dev/null || true
+OLD_STATE=$(udc_state)
+if ! gadget_is_unbound; then
+    unbind_gadget
+    poll_until_success 5 udc_state_changed_from "$OLD_STATE" || true
+fi
 
 # Remove only our mass_storage link (keep adb/ffs links intact).
 for l in "$CONFIG_PATH"/*; do
@@ -28,6 +29,10 @@ done
 rm -f "$CONFIG_PATH/f100" 2>/dev/null || true
 
 # Pre-create empty LUNs before bind to avoid EBUSY on stock kernels
+if ! gadget_ensure_function; then
+    echo "Error: Could not set up mass_storage (toggle off and retry)"
+    exit 1
+fi
 i=0
 while [ $i -lt "$MAX_DEVICES" ]; do
     LUN_DIR="$FUNC_PATH/lun.$i"
@@ -36,10 +41,22 @@ while [ $i -lt "$MAX_DEVICES" ]; do
     i=$((i + 1))
 done
 
-ln -s "$FUNC_PATH" "$CONFIG_PATH/f100" 2>/dev/null || true
+ln -s "$FUNC_PATH" "$CONFIG_PATH/$FUNC_NAME" 2>/dev/null || true
 
-if bind_gadget; then
-    echo "Success"
-else
+if ! bind_gadget; then
+    echo "Error: Could not bind USB controller (toggle off and retry)"
     exit 1
 fi
+
+# Wait for host to configure us
+await_live_gadget 15
+RC=$?
+if [ "$RC" -eq 0 ]; then
+    echo "Success"
+elif [ "$RC" -eq 2 ]; then
+    echo "Success:waiting-host"
+else
+    echo "Error: Bind did not stick (unplug cable, enable, replug)"
+    exit 1
+fi
+exit 0
