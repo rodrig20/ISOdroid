@@ -1,5 +1,6 @@
 package com.rodrig20.isodroid
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -84,6 +85,11 @@ fun SettingsScreen(
     // Initialize the charging state when the screen is created
     LaunchedEffect(Unit) {
         rootManager.getChargingState()
+    }
+
+    // System back button/gesture returns to the home screen.
+    BackHandler {
+        onNavigateBack()
     }
 
 
