@@ -31,6 +31,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
@@ -310,6 +311,10 @@ fun HomeScreen(
     // Observe disk items from the repository
     val itemList by diskItemRepository.diskItems.collectAsState(initial = emptyList())
     var showDialog by remember { mutableStateOf(false) }
+    // Item awaiting remove confirmation (null = no dialog).
+    var itemPendingRemove by remember { mutableStateOf<DiskItem?>(null) }
+    // Checked inside the dialog: also delete the file from storage.
+    var deleteFileToo by remember(itemPendingRemove) { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
 
     Scaffold(
@@ -424,13 +429,11 @@ fun HomeScreen(
                     },
                     trailing = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            // Remove is only enabled when not active and app is enabled
+                            // Remove opens a confirmation: list only, or list + file
+                            // Needs no gadget (list edit, root rm); only blocked
                             IconButton(
-                                onClick = {
-                                    // Remove the disk item from the repository
-                                    coroutineScope.launch { diskItemRepository.removeDiskItem(item) }
-                                },
-                                enabled = isAppEnabled && !item.isActive
+                                onClick = { itemPendingRemove = item },
+                                enabled = !item.isActive
                             ) {
                                 Icon(Icons.Default.Delete, contentDescription = "Remove")
                             }
@@ -443,6 +446,57 @@ fun HomeScreen(
                     }
                 )
             }
+        }
+
+        // Remove confirmation: list only, list + file, or cancel.
+        itemPendingRemove?.let { pending ->
+            // Disk items store the folder; the image itself is folder/name.img.
+            val targetFile = if (pending.mode.equals("Disk", ignoreCase = true) && pending.path != null) {
+                "${pending.path}/${pending.name}.img"
+            } else {
+                pending.path
+            }
+            AlertDialog(
+                onDismissRequest = { itemPendingRemove = null },
+                title = { Text(pending.name.ifBlank { pending.mode }) },
+                text = {
+                    Column {
+                        Text("Remove this item from the list?")
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(top = 8.dp)
+                        ) {
+                            Checkbox(
+                                checked = deleteFileToo,
+                                onCheckedChange = { deleteFileToo = it }
+                            )
+                            Text(
+                                text = "Delete from storage",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        itemPendingRemove = null
+                        coroutineScope.launch {
+                            if (deleteFileToo && !targetFile.isNullOrBlank()) {
+                                val deleted = rootManager.deleteFile(targetFile)
+                                if (!deleted.startsWith("Success")) {
+                                    snackbarHostState.showSnackbar(deleted)
+                                    return@launch
+                                }
+                            }
+                            diskItemRepository.removeDiskItem(pending)
+                        }
+                    }) { Text("Remove") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { itemPendingRemove = null }) { Text("Cancel") }
+                }
+            )
         }
 
         // Show the add item dialog if needed
