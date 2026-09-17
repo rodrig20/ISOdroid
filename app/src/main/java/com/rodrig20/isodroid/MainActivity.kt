@@ -446,6 +446,10 @@ fun HomeScreen(
                     }
                 )
             }
+            // Bottom spacer so the + button never covers the last row.
+            item {
+                Spacer(modifier = Modifier.height(88.dp))
+            }
         }
 
         // Remove confirmation: list only, list + file, or cancel.
