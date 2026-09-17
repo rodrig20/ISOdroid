@@ -22,6 +22,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -60,7 +62,12 @@ fun SettingsScreen(
     val maxDevices by settingsRepository.maxDevicesFlow.collectAsState(initial = 1)
     // Observe the charging suspension state from the root manager
     val isChargingSuspended by rootManager.isChargingSuspendedFlow.collectAsState()
+    // False on kernels without a known charging-control node.
+    val isChargingSupported by rootManager.isChargingSupportedFlow.collectAsState()
     val coroutineScope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
+    // Effect verification can take seconds; lock the switch meanwhile.
+    var isChargingBusy by remember { mutableStateOf(false) }
 
     // State variable to hold the text field value
     var textValue by remember(maxDevices) { mutableStateOf(maxDevices.toString()) }
@@ -81,7 +88,8 @@ fun SettingsScreen(
                     }
                 },
             )
-        }
+        },
+        snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
         Column(
             modifier = Modifier
@@ -172,7 +180,10 @@ fun SettingsScreen(
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            text = if (!isChargingSuspended) "Charging is currently enabled" else "Charging is currently suspended",
+                            text = if (isChargingBusy) "Applying USB change..."
+                            else if (!isChargingSupported) "Charging control is not supported by this kernel"
+                            else if (!isChargingSuspended) "Charging is currently enabled"
+                            else "Charging is currently suspended",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 4.dp, bottom = 8.dp)
@@ -185,22 +196,31 @@ fun SettingsScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = if (!isChargingSuspended) "Enabled" else "Suspended",
+                                text = if (!isChargingSupported) "Unsupported"
+                                else if (!isChargingSuspended) "Enabled"
+                                else "Suspended",
                                 style = MaterialTheme.typography.bodyMedium,
-                                color = if (!isChargingSuspended) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                                color = if (!isChargingSupported) MaterialTheme.colorScheme.onSurfaceVariant
+                                else if (!isChargingSuspended) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.error
                             )
                             Switch(
                                 checked = !isChargingSuspended, // Switch is ON when charging is NOT suspended
                                 onCheckedChange = { allowCharging ->
+                                    if (isChargingBusy) return@Switch
+                                    isChargingBusy = true
                                     coroutineScope.launch {
-                                        val result = rootManager.setChargingState(!allowCharging)
-                                        if (result.contains("Error")) {
-                                            // Handle error if needed
-                                            println("Error setting charging state: $result")
+                                        try {
+                                            val result = rootManager.setChargingState(!allowCharging)
+                                            if (result.contains("Error")) {
+                                                snackbarHostState.showSnackbar(result)
+                                            }
+                                        } finally {
+                                            isChargingBusy = false
                                         }
                                     }
                                 },
-                                enabled = rootManager.isRooted,
+                                enabled = rootManager.isRooted && isChargingSupported && !isChargingBusy,
                                 colors = SwitchDefaults.colors(
                                     checkedTrackColor = MaterialTheme.colorScheme.primary,
                                     checkedThumbColor = MaterialTheme.colorScheme.onPrimary

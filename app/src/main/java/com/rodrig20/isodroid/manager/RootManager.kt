@@ -29,6 +29,10 @@ class RootManager(context: Context) {
     private val _isChargingSuspended = MutableStateFlow(false)
     val isChargingSuspendedFlow: StateFlow<Boolean> = _isChargingSuspended
 
+    // False when the kernel exposes no known charging-control node.
+    private val _isChargingSupported = MutableStateFlow(true)
+    val isChargingSupportedFlow: StateFlow<Boolean> = _isChargingSupported
+
     // Default value for maximum number of devices
     private var maxDevicesValue: Int = 1
     // Provider function to get the current maximum devices setting
@@ -259,38 +263,48 @@ class RootManager(context: Context) {
 
     /**
      * Gets the current charging suspension state
-     * Updates the isChargingSuspendedFlow with the current value
-     * @return True if charging is suspended (value is 1), false otherwise (value is 0)
+     * Probes known kernel backends (input_suspend, charging_enabled, ...);
+     * marks control unsupported when none exists.
+     * Updates the isChargingSuspendedFlow/isChargingSupportedFlow values.
+     * @return True if charging is suspended, false otherwise
      */
     suspend fun getChargingState(): Boolean {
         if (!isRooted) {
             _isChargingSuspended.value = false
+            _isChargingSupported.value = false
             return false
         }
 
-        val result = runScriptAsRoot("get_charging_state.sh")
-        val isSuspended = result.trim().toIntOrNull() == 1
+        val result = resultLine(runScriptAsRoot("get_charging_state.sh"))
+        if (result.equals("unsupported", ignoreCase = true)) {
+            _isChargingSupported.value = false
+            _isChargingSuspended.value = false
+            return false
+        }
+        _isChargingSupported.value = true
+        val isSuspended = result == "1"
         _isChargingSuspended.value = isSuspended
         return isSuspended
     }
 
     /**
      * Sets the charging suspension state
-     * @param suspend True to suspend charging (set to 1), false to allow charging (set to 0)
-     * @return Success status
+     * @param suspend True to suspend charging, false to allow charging
+     * @return "Success" or "Error: ..." for UI feedback
      */
     suspend fun setChargingState(suspend: Boolean): String {
         if (!isRooted) return "Error: Device is not rooted"
 
         val value = if (suspend) "1" else "0"
-        val result = runScriptAsRoot("set_charging_state.sh", listOf(value))
+        val result = resultLine(runScriptAsRoot("set_charging_state.sh", listOf(value)))
 
         // Update the flow with the new state if the operation was successful
         if (!result.contains("Error")) {
+            _isChargingSupported.value = true
             _isChargingSuspended.value = suspend
         }
 
-        return result
+        return result.ifBlank { "Error: Could not set charging state" }
     }
 
     /**
