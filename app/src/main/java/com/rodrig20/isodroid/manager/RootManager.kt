@@ -188,6 +188,17 @@ class RootManager(context: Context) {
     }
 
     /**
+     * Probes the kernel's max LUN count via a throwaway unlinked function
+     * instance. No UDC touch, no host-visible change; safe anytime.
+     * @return "Success:<max>" or "Error: ..." for UI feedback
+     */
+    suspend fun probeMaxLuns(): String {
+        if (!isRooted) return "Error: Device is not rooted"
+
+        return resultLine(runScriptAsRoot("probe_max_luns.sh"))
+    }
+
+    /**
      * Checks if the device has root access by running a simple command with su
      * @return True if the device is rooted, false otherwise
      */

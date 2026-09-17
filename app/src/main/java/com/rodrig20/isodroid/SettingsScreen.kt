@@ -13,6 +13,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -27,6 +29,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -72,6 +75,10 @@ fun SettingsScreen(
 
     // State variable to hold the text field value
     var textValue by remember(maxDevices) { mutableStateOf(maxDevices.toString()) }
+    // Kernel LUN probe state (probing touches nothing live: safe anytime,
+    // but the limit itself only applies with the gadget off).
+    var isProbing by remember { mutableStateOf(false) }
+    var probedMax by remember { mutableStateOf<Int?>(null) }
 
     // Initialize the charging state when the screen is created
     LaunchedEffect(Unit) {
@@ -127,39 +134,99 @@ fun SettingsScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 4.dp, bottom = 8.dp)
                         )
-                        OutlinedTextField(
-                            value = textValue,
-                            onValueChange = { newValue ->
-                                textValue = newValue
-                                // Convert to integer and clamp to minimum value of 1
-                                newValue.toIntOrNull()?.let { value ->
-                                    val clampedValue = if (value < 1) 1 else value
-                                    if (clampedValue.toString() != newValue) {
-                                        textValue = clampedValue.toString()
-                                    }
-                                    // Save the new maximum number of devices to the repository
-                                    coroutineScope.launch {
-                                        settingsRepository.setMaxDevices(clampedValue)
-                                    }
-                                }
-                            },
-                            label = { Text("Device Count") },
-                            supportingText = {
-                                if (isAppEnabled) {
-                                    Text("Disable the USB gadget to change this limit")
-                                } else {
-                                    Text("Current limit: $textValue device${if (textValue != "1") "s" else ""}")
-                                }
-                            },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        Row(
                             modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            enabled = !isAppEnabled,
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = MaterialTheme.colorScheme.primary,
-                                unfocusedBorderColor = MaterialTheme.colorScheme.onSurfaceVariant
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = textValue,
+                                onValueChange = { newValue ->
+                                    textValue = newValue
+                                    // Convert to integer and clamp to minimum value of 1
+                                    newValue.toIntOrNull()?.let { value ->
+                                        val clampedValue = if (value < 1) 1 else value
+                                        if (clampedValue.toString() != newValue) {
+                                            textValue = clampedValue.toString()
+                                        }
+                                        // Save the new maximum number of devices to the repository
+                                        coroutineScope.launch {
+                                            settingsRepository.setMaxDevices(clampedValue)
+                                        }
+                                    }
+                                },
+                                label = { Text("Device Count") },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.weight(1f),
+                                singleLine = true,
+                                enabled = !isAppEnabled,
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                    unfocusedBorderColor = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
                             )
+                            Button(
+                                onClick = {
+                                    if (isProbing) return@Button
+                                    isProbing = true
+                                    coroutineScope.launch {
+                                        try {
+                                            val result = rootManager.probeMaxLuns()
+                                            if (result.startsWith("Success:")) {
+                                                val probed = result.substring("Success:".length).trim().toIntOrNull()
+                                                if (probed != null) {
+                                                    probedMax = probed
+                                                } else {
+                                                    snackbarHostState.showSnackbar(result)
+                                                }
+                                            } else {
+                                                snackbarHostState.showSnackbar(
+                                                    result.ifBlank { "Error: Could not probe LUN limit" }
+                                                )
+                                            }
+                                        } finally {
+                                            isProbing = false
+                                        }
+                                    }
+                                },
+                                enabled = rootManager.isRooted && !isAppEnabled && !isProbing
+                            ) {
+                                Text(if (isProbing) "Probing..." else "Detect kernel Max")
+                            }
+                        }
+                        Text(
+                            text = if (isAppEnabled) "Disable the USB gadget to change this limit"
+                            else {
+                                val limit = textValue.toIntOrNull()
+                                if (limit != null && limit > 8) "Current limit: $textValue devices (some hosts show max 8 per USB device)"
+                                else "Current limit: $textValue device${if (textValue != "1") "s" else ""}"
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        probedMax?.let { max ->
+                            AlertDialog(
+                                onDismissRequest = { probedMax = null },
+                                title = { Text("Kernel LUN limit") },
+                                text = {
+                                    Text(
+                                        if (max > 8) "This kernel supports up to $max LUNs, but most hosts only show the first 8 without a manual rescan. Apply as the limit?"
+                                        else "This kernel supports up to $max LUNs. Apply as the limit?"
+                                    )
+                                },
+                                confirmButton = {
+                                    TextButton(onClick = {
+                                        probedMax = null
+                                        coroutineScope.launch {
+                                            settingsRepository.setMaxDevices(max)
+                                        }
+                                    }) { Text("Apply") }
+                                },
+                                dismissButton = {
+                                    TextButton(onClick = { probedMax = null }) { Text("Cancel") }
+                                }
+                            )
+                        }
                     }
                 }
             }

@@ -12,7 +12,7 @@ ISOdroid is an Android app that turns your device into a bootable USB drive. Wit
 - **Modern Interface**: Built with Jetpack Compose and Material 3 for a clean, modern user experience.
 - **Manage Images**: Easily add or remove disk images from your mount list.
 - **Power Management**: Optionally disable device charging to save battery when connected to a laptop.
-- **Multiple Devices (LUNs)**: Supports multiple simulated storage devices. The maximum number of LUNs is set by the `FSG_MAX_LUNS` kernel macro (up to 16).
+- **Multiple Devices (LUNs)**: Supports multiple simulated storage devices. The maximum number of LUNs is set by the `FSG_MAX_LUNS` kernel macro.
 
 ## Requirements
 
@@ -31,6 +31,13 @@ ISOdroid is an Android app that turns your device into a bootable USB drive. Wit
 ## Note
 
 The mounted disk/LUN may use a filesystem (like F2FS) that some operating systems cannot recognise. You might need to format the virtual drive from your PC before use to ensure compatibility.
+
+More than 8 LUNs need a host rescan: the kernel may support up to 16, but Linux's `usb-storage` only scans LUNs 0-7 per device. Reveal the rest with (replace `host0` with the phone's host):
+```bash
+for l in 8 9 10 11 12 13 14 15; do
+    echo "0 0 $l" | sudo tee /sys/class/scsi_host/host0/scan > /dev/null
+done
+```
 
 ## Warning
 
