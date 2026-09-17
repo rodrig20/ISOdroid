@@ -4,6 +4,7 @@ import android.content.ContentUris
 import android.content.Context
 import android.database.Cursor
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.MediaStore
@@ -32,8 +33,23 @@ fun getRealPathFromURI(context: Context, uri: Uri): String? {
         else if (isDownloadsDocument(uri)) {
             // Handle Downloads document URIs
             val id = DocumentsContract.getDocumentId(uri)
+            // Android 11+: raw file path embedded in the id.
+            if (id.startsWith("raw:")) {
+                return id.removePrefix("raw:")
+            }
+            // MediaStore-backed download (msf:<id>, Android 10+): resolve via Downloads collection; null under scoped storage when _data is unavailable.
+            if (id.startsWith("msf:") && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val msfId = id.removePrefix("msf:")
+                return getDataColumn(
+                    context,
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    "${MediaStore.Downloads._ID}=?",
+                    arrayOf(msfId)
+                )
+            }
+            val numericId = id.toLongOrNull() ?: return null
             val contentUri = ContentUris.withAppendedId(
-                "content://downloads/public_downloads".toUri(), id.toLong()
+                "content://downloads/public_downloads".toUri(), numericId
             )
             return getDataColumn(context, contentUri, null, null)
         }
@@ -122,4 +138,63 @@ fun isDownloadsDocument(uri: Uri): Boolean {
  */
 fun isMediaDocument(uri: Uri): Boolean {
     return "com.android.providers.media.documents" == uri.authority
+}
+
+/**
+ * Resolves a tree URI from a folder picker to a real directory path.
+ * Parses the authority directly instead of relying on isDocumentUri
+ * (which rejects tree URIs on several Android versions).
+ * Primary volume maps to external storage; removable volumes (SD cards,
+ * USB-OTG) map to /storage/<uuid>/. Returns null when unresolvable
+ * (caller keeps manual input).
+ */
+fun getRealPathFromTreeUri(context: Context, treeUri: Uri): String? {
+    if (!"com.android.externalstorage.documents".equals(treeUri.authority, ignoreCase = true)) {
+        return null
+    }
+    val docId = try {
+        DocumentsContract.getTreeDocumentId(treeUri)
+    } catch (_: Exception) {
+        return null
+    }
+    val split = docId.split(":".toRegex()).dropLastWhile { it.isEmpty() }.toTypedArray()
+    if (split.isEmpty()) return null
+    if ("primary".equals(split[0], ignoreCase = true)) {
+        val base = Environment.getExternalStorageDirectory().toString()
+        return if (split.size > 1) "$base/${split[1]}" else base
+    }
+    // Removable volume (SD card, USB-OTG): mounted at /storage/<uuid>.
+    val base = "/storage/${split[0]}"
+    if (split.size > 1) {
+        val candidate = "$base/${split[1]}"
+        if (java.io.File(candidate).isDirectory) return candidate
+        // Fall back to the volume root when the subpath is stale.
+        if (java.io.File(base).isDirectory) return base
+        return null
+    }
+    return base
+}
+
+/**
+ * Best-effort display name for any content/file URI (for pre-filling).
+ */
+fun getDisplayName(context: Context, uri: Uri): String? {
+    if ("file".equals(uri.scheme, ignoreCase = true)) {
+        return uri.lastPathSegment
+    }
+    if (!"content".equals(uri.scheme, ignoreCase = true)) return null
+    var cursor: Cursor? = null
+    try {
+        cursor = context.contentResolver.query(
+            uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null
+        )
+        if (cursor != null && cursor.moveToFirst()) {
+            return cursor.getString(0)
+        }
+    } catch (_: Exception) {
+        // Provider without DISPLAY_NAME support.
+    } finally {
+        cursor?.close()
+    }
+    return uri.lastPathSegment
 }

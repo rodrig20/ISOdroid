@@ -1,11 +1,14 @@
 package com.rodrig20.isodroid
 
 import android.app.Activity
+import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -33,6 +36,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
@@ -66,9 +70,37 @@ import com.rodrig20.isodroid.data.SettingsRepository
 import com.rodrig20.isodroid.manager.RootManager
 import com.rodrig20.isodroid.models.DiskItem
 import com.rodrig20.isodroid.ui.theme.ISOdroidTheme
+import com.rodrig20.isodroid.utils.getDisplayName
+import com.rodrig20.isodroid.utils.getRealPathFromTreeUri
+import com.rodrig20.isodroid.utils.getRealPathFromURI
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.InternalSerializationApi
+import java.io.File
+
+/**
+ * Copies a content URI into app-private storage so the USB gadget (which
+ * needs a real file path, not a content:// URI) can use it. Returns the
+ * absolute path of the copy, or null when the content can't be read.
+ */
+private suspend fun copyUriToAppStorage(context: Context, uri: Uri): String? =
+    withContext(Dispatchers.IO) {
+        try {
+            val rawName = getDisplayName(context, uri)?.takeIf { it.isNotBlank() }
+                ?: "image_${System.currentTimeMillis()}.iso"
+            val safeName = File(rawName).name
+            val dir = File(context.filesDir, "images").apply { mkdirs() }
+            val out = File(dir, safeName)
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                out.outputStream().use { output -> input.copyTo(output) }
+            } ?: return@withContext null
+            out.absolutePath
+        } catch (_: Exception) {
+            null
+        }
+    }
 
 
 // Screen navigation sealed class to handle different screens in the app
@@ -336,11 +368,7 @@ fun HomeScreen(
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
         floatingActionButton = {
-            FloatingActionButton(onClick = {
-                if (isAppEnabled) {
-                    showDialog = true
-                }
-            }) {
+            FloatingActionButton(onClick = { showDialog = true }) {
                 Icon(Icons.Default.Add, contentDescription = "Add Item")
             }
         }
@@ -535,13 +563,61 @@ fun AddItemDialog(
     onDismiss: () -> Unit, // Callback for dismissing the dialog
     onItemAction: (DiskItem) -> Unit // Callback for when an item is added
 ) {
-    LocalContext.current
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var selectedMode by remember { mutableStateOf("ISO") } // Selected mode: ISO or Disk
     var path by remember { mutableStateOf<String?>(null) } // File or folder path
     var name by remember { mutableStateOf("") } // Display name for the item
     var diskSizeGB by remember { mutableStateOf(0.0) } // Size of the disk in GB
     var isPathValid by remember { mutableStateOf(false) } // Whether the path is valid
     var isPathValidationLoading by remember { mutableStateOf(false) } // Whether path validation is in progress
+    var isResolving by remember { mutableStateOf(false) } // Reading/copying a picked file
+    var resolveNote by remember { mutableStateOf<String?>(null) } // Picker outcome hint
+
+    // System file picker: the USB gadget needs a real file path, so picked content is resolved to a path when possible, else copied into app storage; the display name is pre-filled from the file.
+    val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val picked = uri ?: return@rememberLauncherForActivityResult
+        isResolving = true
+        resolveNote = null
+        scope.launch(Dispatchers.IO) {
+            val resolved = getRealPathFromURI(context, picked)
+            if (resolved != null) {
+                withContext(Dispatchers.Main) {
+                    path = resolved
+                    if (name.isBlank()) {
+                        getDisplayName(context, picked)?.let { name = it }
+                    }
+                    isResolving = false
+                }
+            } else {
+                val copied = copyUriToAppStorage(context, picked)
+                withContext(Dispatchers.Main) {
+                    if (copied != null) {
+                        path = copied
+                        if (name.isBlank()) {
+                            getDisplayName(context, picked)?.let { name = it }
+                        }
+                        resolveNote = "Copied into app storage"
+                    } else {
+                        resolveNote = "Could not read this file"
+                    }
+                    isResolving = false
+                }
+            }
+        }
+    }
+
+    // System folder picker for Disk mode: the folder holds the created image; tree URIs only resolve on the primary volume, otherwise manual input is needed.
+    val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        val picked = uri ?: return@rememberLauncherForActivityResult
+        val resolved = getRealPathFromTreeUri(context, picked)
+        if (resolved != null) {
+            path = resolved
+            resolveNote = null
+        } else {
+            resolveNote = "Could not resolve folder, type it manually"
+        }
+    }
 
     // Validate the path whenever it changes using RootManager
     LaunchedEffect(path, selectedMode) {
@@ -637,6 +713,14 @@ fun AddItemDialog(
                             },
                             modifier = Modifier.fillMaxWidth()
                         )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedButton(
+                            onClick = { pickFile.launch(arrayOf("*/*")) },
+                            enabled = !isResolving,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(if (isResolving) "Reading file..." else "Browse files")
+                        }
                     }
                 } else if (selectedMode == "Disk") {
                     Column {
@@ -673,6 +757,13 @@ fun AddItemDialog(
                             modifier = Modifier.fillMaxWidth()
                         )
                         Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedButton(
+                            onClick = { pickFolder.launch(null) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Browse folders")
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
                         // Disk size input for disk mode
                         OutlinedTextField(
                             value = if (diskSizeGB > 0) diskSizeGB.toString() else "",
@@ -699,6 +790,16 @@ fun AddItemDialog(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
+                // Picker outcome hint (copied into app storage, errors, ...).
+                resolveNote?.let { note ->
+                    Text(
+                        text = note,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+                }
+
                 // Action buttons
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -710,7 +811,7 @@ fun AddItemDialog(
                     Spacer(modifier = Modifier.width(8.dp))
                     // Enable the add button based on validation criteria
                     val isAddButtonEnabled = when (selectedMode) {
-                        "ISO" -> !path.isNullOrBlank() && name.isNotBlank() && isPathValid
+                        "ISO" -> !path.isNullOrBlank() && name.isNotBlank() && isPathValid && !isResolving
                         "Disk" -> !path.isNullOrBlank() && diskSizeGB > 0 && name.isNotBlank() && isPathValid
                         else -> name.isNotBlank()
                     }
