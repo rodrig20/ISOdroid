@@ -22,21 +22,23 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -59,7 +61,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
 import androidx.core.view.WindowCompat
 import com.google.accompanist.systemuicontroller.rememberSystemUiController
 import com.rodrig20.isodroid.data.DiskItemRepository
@@ -480,7 +481,7 @@ fun HomeScreen(
  * Dialog for adding a new disk item
  * Allows users to specify whether it's an ISO or Disk image and provide required information
  */
-@OptIn(InternalSerializationApi::class)
+@OptIn(InternalSerializationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun AddItemDialog(
     rootManager: RootManager, // Manager for root operations
@@ -558,30 +559,36 @@ fun AddItemDialog(
         }
     }
 
-    Dialog(onDismissRequest = onDismiss) {
-        Card {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    text = "Add New Item",
-                    style = MaterialTheme.typography.headlineSmall
-                )
-                Spacer(modifier = Modifier.height(16.dp))
+    // Enable the add button based on validation criteria
+    val isAddButtonEnabled = when (selectedMode) {
+        "ISO" -> !path.isNullOrBlank() && name.isNotBlank() && isPathValid && !isResolving
+        "Disk" -> !path.isNullOrBlank() && diskSizeGB > 0 && name.isNotBlank() && isPathValid
+        else -> name.isNotBlank()
+    }
 
-                // Radio buttons to select ISO or Disk mode
-                Row {
-                    RadioButton(
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add item") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Mode selector chips instead of radio buttons
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
                         selected = selectedMode == "ISO",
-                        onClick = { selectedMode = "ISO" }
+                        onClick = { selectedMode = "ISO" },
+                        label = { Text("ISO") },
+                        modifier = Modifier.weight(1f)
                     )
-                    Text("ISO", modifier = Modifier.align(Alignment.CenterVertically))
-                    Spacer(modifier = Modifier.width(16.dp))
-                    RadioButton(
+                    FilterChip(
                         selected = selectedMode == "Disk",
-                        onClick = { selectedMode = "Disk" }
+                        onClick = { selectedMode = "Disk" },
+                        label = { Text("Disk") },
+                        modifier = Modifier.weight(1f)
                     )
-                    Text("Disk", modifier = Modifier.align(Alignment.CenterVertically))
                 }
-                Spacer(modifier = Modifier.height(16.dp))
 
                 // Display name input field
                 OutlinedTextField(
@@ -600,7 +607,6 @@ fun AddItemDialog(
                     },
                     modifier = Modifier.fillMaxWidth()
                 )
-                Spacer(modifier = Modifier.height(8.dp))
 
                 // Show different inputs based on selected mode
                 if (selectedMode == "ISO") {
@@ -687,7 +693,6 @@ fun AddItemDialog(
                         ) {
                             Text("Browse folders")
                         }
-                        Spacer(modifier = Modifier.height(8.dp))
                         // Disk size input for disk mode
                         OutlinedTextField(
                             value = if (diskSizeGB > 0) diskSizeGB.toString() else "",
@@ -712,52 +717,39 @@ fun AddItemDialog(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
-
                 // Picker outcome hint (copied into app storage, errors, ...).
                 resolveNote?.let { note ->
                     Text(
                         text = note,
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(bottom = 8.dp)
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-
-                // Action buttons
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End
-                ) {
-                    TextButton(onClick = onDismiss) {
-                        Text("Cancel")
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    // Enable the add button based on validation criteria
-                    val isAddButtonEnabled = when (selectedMode) {
-                        "ISO" -> !path.isNullOrBlank() && name.isNotBlank() && isPathValid && !isResolving
-                        "Disk" -> !path.isNullOrBlank() && diskSizeGB > 0 && name.isNotBlank() && isPathValid
-                        else -> name.isNotBlank()
-                    }
-                    Button(
-                        onClick = {
-                            // Create and add the new item
-                            val newItem = DiskItem(
-                                mode = selectedMode,
-                                path = path,
-                                name = name,
-                                diskSizeGB = diskSizeGB
-                            )
-                            onItemAction(newItem)
-                        },
-                        enabled = isAddButtonEnabled
-                    ) {
-                        Text("Add")
-                    }
-                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    // Create and add the new item
+                    val newItem = DiskItem(
+                        mode = selectedMode,
+                        path = path,
+                        name = name,
+                        diskSizeGB = diskSizeGB
+                    )
+                    onItemAction(newItem)
+                },
+                enabled = isAddButtonEnabled
+            ) {
+                Text("Add")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
             }
         }
-    }
+    )
 }
 
 /**
