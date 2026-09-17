@@ -43,6 +43,19 @@ done
 
 ln -s "$FUNC_PATH" "$CONFIG_PATH/$FUNC_NAME" 2>/dev/null || true
 
+# Drop stale LUNs beyond the new limit; only empty ones are removed and the bare lun dir is never touched.
+i=$MAX_DEVICES
+while [ $i -le 31 ]; do
+    STALE_DIR="$FUNC_PATH/lun.$i"
+    if [ -d "$STALE_DIR" ]; then
+        CONTENT=$(cat "$STALE_DIR/file" 2>/dev/null | tr -d '[:space:]')
+        if [ -z "$CONTENT" ]; then
+            rmdir "$STALE_DIR" 2>/dev/null || true
+        fi
+    fi
+    i=$((i + 1))
+done
+
 if ! bind_gadget; then
     echo "Error: Could not bind USB controller (toggle off and retry)"
     exit 1

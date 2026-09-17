@@ -53,7 +53,8 @@ import kotlinx.coroutines.launch
 @Composable
 fun SettingsScreen(
     rootManager: com.rodrig20.isodroid.manager.RootManager,
-    onNavigateBack: () -> Unit
+    onNavigateBack: () -> Unit,
+    isAppEnabled: Boolean = false // LUN limit is locked while the gadget is on
 ) {
     val context = LocalContext.current
     val settingsRepository = remember { SettingsRepository(context) }
@@ -144,11 +145,16 @@ fun SettingsScreen(
                             },
                             label = { Text("Device Count") },
                             supportingText = {
-                                Text("Current limit: $textValue device${if (textValue != "1") "s" else ""}")
+                                if (isAppEnabled) {
+                                    Text("Disable the USB gadget to change this limit")
+                                } else {
+                                    Text("Current limit: $textValue device${if (textValue != "1") "s" else ""}")
+                                }
                             },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true,
+                            enabled = !isAppEnabled,
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedBorderColor = MaterialTheme.colorScheme.primary,
                                 unfocusedBorderColor = MaterialTheme.colorScheme.onSurfaceVariant

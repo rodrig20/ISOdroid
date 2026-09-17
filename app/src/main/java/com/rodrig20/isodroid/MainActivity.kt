@@ -230,7 +230,8 @@ fun App() {
             )
             is Screen.Settings -> SettingsScreen(
                 onNavigateBack = { currentScreen = Screen.Home },
-                rootManager = rootManager
+                rootManager = rootManager,
+                isAppEnabled = isAppEnabled
             )
         }
     }
