@@ -312,6 +312,9 @@ fun HomeScreen(
     // Observe disk items from the repository
     val itemList by diskItemRepository.diskItems.collectAsState(initial = emptyList())
     var showDialog by remember { mutableStateOf(false) }
+    // Disk item whose FAT32 creation failed for being too small: offer
+    // fallback formats (null = no dialog).
+    var formatFallbackItem by remember { mutableStateOf<DiskItem?>(null) }
     // Item awaiting remove confirmation (null = no dialog).
     var itemPendingRemove by remember { mutableStateOf<DiskItem?>(null) }
     // Item with open per-LUN settings (null = no dialog).
@@ -641,6 +644,41 @@ fun HomeScreen(
             )
         }
 
+        // FAT32 fallback: image too small, offer other formats or cancel.
+        formatFallbackItem?.let { pending ->
+            AlertDialog(
+                onDismissRequest = { formatFallbackItem = null },
+                title = { Text("Image too small for FAT32") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("FAT32 needs a bigger image (min ~36MB) for this ${pending.diskSizeGB} GB disk. Create it with another format instead?")
+                        SettingsRepository.DISK_FORMATS.filter { it != "vfat32" }.forEach { format ->
+                            OutlinedButton(
+                                onClick = {
+                                    formatFallbackItem = null
+                                    coroutineScope.launch {
+                                        val retry = createAndAddDiskItem(
+                                            rootManager, diskItemRepository, pending, format
+                                        )
+                                        if (retry != null) {
+                                            snackbarHostState.showSnackbar(retry)
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(SettingsRepository.diskFormatLabel(format))
+                            }
+                        }
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { formatFallbackItem = null }) { Text("Cancel") }
+                },
+                confirmButton = { }
+            )
+        }
+
         // Show the add item dialog if needed
         if (showDialog) {
             AddItemDialog(
@@ -649,25 +687,11 @@ fun HomeScreen(
                 onItemAction = { newItem ->
                     // Add the new item to the repository
                     coroutineScope.launch {
-                        if (newItem.mode.equals("Disk", ignoreCase = true) &&
-                            newItem.path != null &&
-                            newItem.diskSizeGB > 0 &&
-                            newItem.name.isNotEmpty()) {
-                            // Create disk image if mode is Disk.
-                            val fixedImage = "${newItem.path}/${newItem.name}.img"
-                            val diskImagePathResult = rootManager.createDiskImage(newItem.path, newItem.name, newItem.diskSizeGB)
-                            if (diskImagePathResult.startsWith("Success:")) {
-                                val imagePath = diskImagePathResult.substring("Success:".length).trim()
-                                val diskItemWithImagePath = newItem.copy(
-                                    path = imagePath.ifBlank { newItem.path },
-                                    imageName = fixedImage
-                                )
-                                diskItemRepository.addDiskItem(diskItemWithImagePath)
-                            } else {
-                                diskItemRepository.addDiskItem(newItem.copy(imageName = fixedImage))
-                            }
-                        } else {
-                            diskItemRepository.addDiskItem(newItem)
+                        val retry = createAndAddDiskItem(
+                            rootManager, diskItemRepository, newItem
+                        )
+                        if (retry != null) {
+                            formatFallbackItem = newItem
                         }
                     }
                     showDialog = false
@@ -675,6 +699,48 @@ fun HomeScreen(
             )
         }
     }
+}
+
+/**
+ * Creates the disk image for Disk-mode items (fixing the image path so
+ * later display renames can't move it) and stores the item.
+ * @return the FAT32_TOO_SMALL result when the caller should offer
+ * fallback formats, null when the item was stored.
+ */
+@OptIn(InternalSerializationApi::class)
+private suspend fun createAndAddDiskItem(
+    rootManager: RootManager,
+    diskItemRepository: DiskItemRepository,
+    newItem: DiskItem,
+    formatOverride: String? = null
+): String? {
+    if (!newItem.mode.equals("Disk", ignoreCase = true) ||
+        newItem.path == null ||
+        newItem.diskSizeGB <= 0 ||
+        newItem.name.isEmpty()
+    ) {
+        diskItemRepository.addDiskItem(newItem)
+        return null
+    }
+    // Create disk image if mode is Disk.
+    val fixedImage = "${newItem.path}/${newItem.name}.img"
+    val diskImagePathResult = rootManager.createDiskImage(
+        newItem.path, newItem.name, newItem.diskSizeGB, formatOverride
+    )
+    if (diskImagePathResult.startsWith("Success:")) {
+        val imagePath = diskImagePathResult.substring("Success:".length).trim()
+        val diskItemWithImagePath = newItem.copy(
+            path = imagePath.ifBlank { newItem.path },
+            imageName = fixedImage
+        )
+        diskItemRepository.addDiskItem(diskItemWithImagePath)
+        return null
+    }
+    if (diskImagePathResult.contains("FAT32_TOO_SMALL")) {
+        return diskImagePathResult
+    }
+    diskItemRepository.addDiskItem(newItem.copy(imageName = fixedImage))
+    return null
 }
 
 /**
@@ -690,6 +756,11 @@ fun AddItemDialog(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    // Current disk image format for the hint below (creation reads it too).
+    val settingsRepository = remember { SettingsRepository(context) }
+    val diskFormat by settingsRepository.diskFormatFlow.collectAsState(
+        initial = SettingsRepository.DISK_FORMAT_DEFAULT
+    )
     var selectedMode by remember { mutableStateOf("ISO") } // Selected mode: ISO or Disk
     var path by remember { mutableStateOf<String?>(null) } // File or folder path
     var name by remember { mutableStateOf("") } // Display name for the item
@@ -913,6 +984,11 @@ fun AddItemDialog(
                             },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             modifier = Modifier.fillMaxWidth()
+                        )
+                        Text(
+                            text = "Format: ${SettingsRepository.diskFormatLabel(diskFormat)} (change in Settings)",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }

@@ -25,6 +25,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -70,6 +71,8 @@ fun SettingsScreen(
     val maxDevices by settingsRepository.maxDevicesFlow.collectAsState(initial = 1)
     // USB identity strings shown to the host (empty = Android default).
     val usbIdentity by settingsRepository.usbIdentityFlow.collectAsState(initial = UsbIdentity())
+    // Disk image format for newly created images.
+    val diskFormat by settingsRepository.diskFormatFlow.collectAsState(initial = SettingsRepository.DISK_FORMAT_DEFAULT)
     // Observe the charging suspension state from the root manager
     val isChargingSuspended by rootManager.isChargingSuspendedFlow.collectAsState()
     // False on kernels without a known charging-control node.
@@ -87,6 +90,29 @@ fun SettingsScreen(
     var dialogManufacturer by remember { mutableStateOf("") }
     var dialogProduct by remember { mutableStateOf("") }
     var dialogSerial by remember { mutableStateOf("") }
+    // Disk format picker dialog state.
+    var showFormatDialog by remember { mutableStateOf(false) }
+    var dialogFormat by remember { mutableStateOf(SettingsRepository.DISK_FORMAT_DEFAULT) }
+    // Probe result: format -> "" supported, else reason. Null = not probed yet.
+    var fsSupport by remember { mutableStateOf<Map<String, String>?>(null) }
+
+    // Probe tool support whenever the format dialog opens (fast, read-only).
+    LaunchedEffect(showFormatDialog) {
+        if (!showFormatDialog) return@LaunchedEffect
+        val result = rootManager.probeFsTools()
+        if (!result.startsWith("Success:")) return@LaunchedEffect
+        fsSupport = result.removePrefix("Success:").trim()
+            .split(Regex("\\s+"))
+            .mapNotNull { token ->
+                val kv = token.split("=", limit = 2)
+                if (kv.size != 2) null
+                else {
+                    val value = kv[1].split(":", limit = 2)
+                    if (value.getOrNull(0) == "1") kv[0] to ""
+                    else kv[0] to (value.getOrNull(1) ?: "unavailable")
+                }
+            }.toMap()
+    }
     // Kernel LUN probe state.
     var isProbing by remember { mutableStateOf(false) }
     var probedMax by remember { mutableStateOf<Int?>(null) }
@@ -156,6 +182,15 @@ fun SettingsScreen(
                     dialogProduct = usbIdentity.product
                     dialogSerial = usbIdentity.serial
                     showIdentityDialog = true
+                }
+            )
+            Divider()
+            PreferenceRow(
+                title = "Disk image format",
+                summary = SettingsRepository.diskFormatLabel(diskFormat),
+                onClick = {
+                    dialogFormat = diskFormat
+                    showFormatDialog = true
                 }
             )
             Divider()
@@ -318,6 +353,79 @@ fun SettingsScreen(
                 },
                 dismissButton = {
                     TextButton(onClick = { showIdentityDialog = false }) { Text("Cancel") }
+                }
+            )
+        }
+
+        // Disk image format picker dialog.
+        if (showFormatDialog) {
+            AlertDialog(
+                onDismissRequest = { showFormatDialog = false },
+                title = { Text("Disk image format") },
+                text = {
+                    Column {
+                        SettingsRepository.DISK_FORMATS.forEach { format ->
+                            // Null map = probe pending: rows stay enabled.
+                            val reason = fsSupport?.get(format)
+                            val supported = reason == null || reason.isEmpty()
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .then(
+                                        if (supported) Modifier.clickable { dialogFormat = format }
+                                        else Modifier
+                                    )
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = dialogFormat == format,
+                                    onClick = { dialogFormat = format },
+                                    enabled = supported
+                                )
+                                Column(modifier = Modifier.padding(start = 8.dp)) {
+                                    Text(
+                                        text = SettingsRepository.diskFormatLabel(format),
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = if (supported) MaterialTheme.colorScheme.onSurface
+                                        else MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    if (!reason.isNullOrEmpty()) {
+                                        Text(
+                                            text = SettingsRepository.fsProbeReason(reason),
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.error
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        Text(
+                            text = "Used when creating new disk images.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        if (fsSupport?.get(dialogFormat)?.isNotEmpty() == true) {
+                            coroutineScope.launch {
+                                snackbarHostState.showSnackbar(
+                                    "${SettingsRepository.diskFormatLabel(dialogFormat)} is not supported by this kernel"
+                                )
+                            }
+                            return@TextButton
+                        }
+                        showFormatDialog = false
+                        coroutineScope.launch {
+                            settingsRepository.setDiskFormat(dialogFormat)
+                        }
+                    }) { Text("Set") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showFormatDialog = false }) { Text("Cancel") }
                 }
             )
         }

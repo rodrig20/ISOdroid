@@ -181,15 +181,27 @@ class RootManager(context: Context) {
      * @param sizeGB Size of the disk in gigabytes
      * @return Result string indicating success or error
      */
-    suspend fun createDiskImage(folderPath: String, diskName: String, sizeGB: Double): String {
+    suspend fun createDiskImage(
+        folderPath: String,
+        diskName: String,
+        sizeGB: Double,
+        formatOverride: String? = null // Null = read from settings
+    ): String {
         if (!isRooted) return "Error: Device is not rooted"
         if (folderPath.isEmpty()) return "Error: Folder path is empty"
         if (sizeGB <= 0) return "Error: Disk size must be greater than 0"
 
         // Convert size from GB to bytes
         val sizeInBytes = (sizeGB * 1000 * 1000 * 1000).toLong()
+        val format = formatOverride
+            ?: SettingsRepository(appContext).diskFormatFlow.first()
 
-        return runScriptAsRoot("create_disk_image.sh", listOf(folderPath, diskName, sizeInBytes.toString()))
+        return resultLine(
+            runScriptAsRoot(
+                "create_disk_image.sh",
+                listOf(folderPath, diskName, sizeInBytes.toString(), format)
+            )
+        )
     }
 
     /**
@@ -248,6 +260,17 @@ class RootManager(context: Context) {
             )
         )
         return if (result.trim() == "DELETED") "Success" else "Error: Could not delete file"
+    }
+
+    /**
+     * Probes which disk image formats this kernel can create (tool layer).
+     * Read-only: creates nothing.
+     * @return "Success:<fmt>=<0|1>[:reason] ..." or "Error: ..." for UI feedback
+     */
+    suspend fun probeFsTools(): String {
+        if (!isRooted) return "Error: Device is not rooted"
+
+        return resultLine(runScriptAsRoot("probe_fs_tools.sh"))
     }
 
     /**

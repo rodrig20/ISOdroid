@@ -40,6 +40,8 @@ class SettingsRepository(private val context: Context) {
         private val USB_MANUFACTURER_KEY = stringPreferencesKey("usb_manufacturer")
         private val USB_PRODUCT_KEY = stringPreferencesKey("usb_product")
         private val USB_SERIAL_KEY = stringPreferencesKey("usb_serial")
+        // Key for the disk image format for newly created images.
+        private val DISK_FORMAT_KEY = stringPreferencesKey("disk_format")
         // USB string descriptors cap (keep well under the 126-char limit).
         const val USB_STRING_MAX_LEN = 64
 
@@ -50,6 +52,34 @@ class SettingsRepository(private val context: Context) {
          */
         fun sanitizeUsbString(value: String): String =
             value.trim().filter { it >= ' ' && it != '\'' }.take(USB_STRING_MAX_LEN)
+
+        /** Disk image formats offered in Settings. */
+        val DISK_FORMATS = listOf("exfat", "vfat32", "ntfs", "ext4", "f2fs", "none")
+
+        /** Default format for newly created images. */
+        const val DISK_FORMAT_DEFAULT = "exfat"
+
+        /**
+         * Human label for a disk format value.
+         */
+        fun diskFormatLabel(format: String): String = when (format) {
+            "exfat" -> "exFAT"
+            "vfat32" -> "FAT32"
+            "ntfs" -> "NTFS"
+            "ext4" -> "ext4"
+            "f2fs" -> "F2FS"
+            "none" -> "None (raw)"
+            else -> format
+        }
+
+        /**
+         * Human reason why a format probed unavailable (probe token suffix).
+         */
+        fun fsProbeReason(reason: String): String = when (reason) {
+            "no-tool" -> "no mkfs tool on this kernel"
+            "no-loop" -> "no free loop device"
+            else -> reason
+        }
     }
 
     // Flow of the maximum number of devices setting that can be observed for changes
@@ -89,6 +119,22 @@ class SettingsRepository(private val context: Context) {
             settings[USB_MANUFACTURER_KEY] = sanitizeUsbString(manufacturer)
             settings[USB_PRODUCT_KEY] = sanitizeUsbString(product)
             settings[USB_SERIAL_KEY] = sanitizeUsbString(serial)
+        }
+    }
+
+    // Flow of the disk image format for newly created images.
+    val diskFormatFlow: Flow<String> = context.settingsDataStore.data
+        .map { preferences ->
+            preferences[DISK_FORMAT_KEY] ?: DISK_FORMAT_DEFAULT
+        }
+
+    /**
+     * Sets the disk image format. Unknown values fall back to default.
+     */
+    suspend fun setDiskFormat(format: String) {
+        val safe = if (DISK_FORMATS.contains(format)) format else DISK_FORMAT_DEFAULT
+        context.settingsDataStore.edit { settings ->
+            settings[DISK_FORMAT_KEY] = safe
         }
     }
 }

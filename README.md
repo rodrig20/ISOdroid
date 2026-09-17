@@ -30,7 +30,7 @@ ISOdroid is an Android app that turns your device into a bootable USB drive. Wit
 
 ## Note
 
-The mounted disk/LUN may use a filesystem (like F2FS) that some operating systems cannot recognise. You might need to format the virtual drive from your PC before use to ensure compatibility.
+New disk images are formatted in-app with the format from Settings (exFAT by default; FAT32, NTFS, ext4, F2FS or raw available, depending on your kernel's tools). FAT32 needs images of at least ~36MB.
 
 More than 8 LUNs need a host rescan: the kernel may support up to 16, but Linux's `usb-storage` only scans LUNs 0-7 per device. Reveal the rest with (replace `host0` with the phone's host):
 ```bash
