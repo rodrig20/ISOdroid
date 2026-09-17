@@ -144,16 +144,34 @@ class RootManager(context: Context) {
      * @param mode Mode of the item - either "ISO" or "Disk" (defaults to "ISO")
      * @return Result string indicating success or error
      */
-    suspend fun mountItem(filePath: String, displayName: String = "", mode: String = "ISO"): String {
+    suspend fun mountItem(
+        filePath: String,
+        displayName: String = "",
+        mode: String = "ISO",
+        readOnly: Boolean? = null, // Null = derive from mode (Disk rw, else ro)
+        cdrom: Boolean = false,
+        imagePath: String? = null // Fixed Disk image path (display renames never touch the file)
+    ): String {
         if (!isRooted) return "Error: Device is not rooted"
 
         // Encode the display name to handle special characters
         val encodedName = displayName.replace("'", "'\"'\"'")
-        // Construct the actual file path based on mode
-        val actualFilePath = if (mode.equals("Disk", ignoreCase = true)) "$filePath/$displayName.img" else filePath
+        // Disk images live at a fixed path from creation time; display
+        // renames must not move them, so prefer the stored path.
+        val actualFilePath = if (mode.equals("Disk", ignoreCase = true)) {
+            imagePath?.takeIf { it.isNotBlank() } ?: "$filePath/$displayName.img"
+        } else {
+            filePath
+        }
         val maxDevices = getMaxDevices()
+        val roArg = when (readOnly) {
+            true -> "1"
+            false -> "0"
+            null -> ""
+        }
+        val cdromArg = if (cdrom) "1" else "0"
 
-        return resultLine(runScriptAsRoot("mount_item.sh", listOf(filePath, encodedName, mode, actualFilePath, (maxDevices - 1).toString())))
+        return resultLine(runScriptAsRoot("mount_item.sh", listOf(filePath, encodedName, mode, actualFilePath, (maxDevices - 1).toString(), roArg, cdromArg)))
     }
 
     /**

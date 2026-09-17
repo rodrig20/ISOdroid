@@ -28,6 +28,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -313,6 +314,8 @@ fun HomeScreen(
     var showDialog by remember { mutableStateOf(false) }
     // Item awaiting remove confirmation (null = no dialog).
     var itemPendingRemove by remember { mutableStateOf<DiskItem?>(null) }
+    // Item with open per-LUN settings (null = no dialog).
+    var itemPendingConfig by remember { mutableStateOf<DiskItem?>(null) }
     // Checked inside the dialog: also delete the file from storage.
     var deleteFileToo by remember(itemPendingRemove) { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
@@ -371,7 +374,14 @@ fun HomeScreen(
                         var updatedItem: DiskItem
                         if (newItemState) {
                             // Mount the item if the new state is active
-                            val result = rootManager.mountItem(item.path ?: "", item.name, item.mode)
+                            val result = rootManager.mountItem(
+                                item.path ?: "",
+                                item.name,
+                                item.mode,
+                                readOnly = item.readOnly,
+                                cdrom = item.cdrom,
+                                imagePath = item.imageName
+                            )
                             if (result.startsWith("Success:")) {
                                 val lunId = result.substring("Success:".length)
                                 updatedItem = item.copy(isActive = true, lunId = lunId)
@@ -426,9 +436,18 @@ fun HomeScreen(
                             append(" · $fileName")
                         }
                         item.lunId?.let { append(" · LUN $it") }
+                        if (item.cdrom) append(" · CD-ROM")
+                        else if (item.effectiveReadOnly()) append(" · read-only")
                     },
                     trailing = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
+                            // Per-LUN settings (display name, read-only, CD-ROM).
+                            IconButton(
+                                onClick = { itemPendingConfig = item },
+                                enabled = !item.isActive
+                            ) {
+                                Icon(Icons.Default.Edit, contentDescription = "Edit")
+                            }
                             // Remove opens a confirmation: list only, or list + file
                             // Needs no gadget (list edit, root rm); only blocked
                             IconButton(
@@ -454,9 +473,10 @@ fun HomeScreen(
 
         // Remove confirmation: list only, list + file, or cancel.
         itemPendingRemove?.let { pending ->
-            // Disk items store the folder; the image itself is folder/name.img.
+            // Disk items store the folder; the image itself is fixed at
+            // creation time (display renames never touch the file).
             val targetFile = if (pending.mode.equals("Disk", ignoreCase = true) && pending.path != null) {
-                "${pending.path}/${pending.name}.img"
+                pending.imageName ?: "${pending.path}/${pending.name}.img"
             } else {
                 pending.path
             }
@@ -503,6 +523,124 @@ fun HomeScreen(
             )
         }
 
+        // Per-LUN settings: read-only and CD-ROM flags.
+        itemPendingConfig?.let { pending ->
+            val live = itemList.find { it.id == pending.id } ?: pending
+            val editable = !live.isActive
+            val roEffective = live.cdrom || live.effectiveReadOnly()
+            // Display name draft: applied on Done. Renaming never touches
+            // the file; legacy Disk items snapshot their image path first.
+            var editedName by remember(pending.id) { mutableStateOf(live.name) }
+            AlertDialog(
+                onDismissRequest = { itemPendingConfig = null },
+                title = { Text(live.name.ifBlank { live.mode }) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = editedName,
+                            onValueChange = { editedName = it },
+                            label = { Text("Display name") },
+                            supportingText = {
+                                Text("Visible name only, the file keeps its name")
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            enabled = editable
+                        )
+                        // Actual file on storage (reference only, never editable here).
+                        OutlinedTextField(
+                            value = if (live.mode.equals("Disk", ignoreCase = true)) {
+                                live.imageName
+                                    ?: live.path?.let { "$it/${live.name}.img" }.orEmpty()
+                            } else {
+                                live.path.orEmpty()
+                            },
+                            onValueChange = {},
+                            label = { Text("File") },
+                            modifier = Modifier.fillMaxWidth(),
+                            readOnly = true,
+                            singleLine = true
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Read-only",
+                                    style = MaterialTheme.typography.bodyLarge
+                                )
+                                Text(
+                                    text = if (live.cdrom) "Forced by CD-ROM"
+                                    else if (live.readOnly == null) "Auto (${if (roEffective) "read-only" else "writable"})"
+                                    else if (roEffective) "Writes blocked"
+                                    else "Writable",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = roEffective,
+                                onCheckedChange = {
+                                    coroutineScope.launch {
+                                        diskItemRepository.updateDiskItem(live.copy(readOnly = it))
+                                    }
+                                },
+                                enabled = editable && !live.cdrom
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "CD-ROM emulation",
+                                    style = MaterialTheme.typography.bodyLarge
+                                )
+                                Text(
+                                    text = "For old BIOS/UEFI boot",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = live.cdrom,
+                                onCheckedChange = {
+                                    coroutineScope.launch {
+                                        diskItemRepository.updateDiskItem(live.copy(cdrom = it))
+                                    }
+                                },
+                                enabled = editable
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        itemPendingConfig = null
+                        val trimmed = editedName.trim()
+                        if (trimmed.isNotEmpty() && trimmed != live.name) {
+                            var updated = live.copy(name = trimmed)
+                            // Legacy Disk items predate imageName: snapshot the
+                            // current image path so the rename can't break mounts.
+                            if (updated.mode.equals("Disk", ignoreCase = true) &&
+                                updated.imageName == null && updated.path != null
+                            ) {
+                                updated = updated.copy(imageName = "${updated.path}/${live.name}.img")
+                            }
+                            val finalItem = updated
+                            coroutineScope.launch {
+                                diskItemRepository.updateDiskItem(finalItem)
+                            }
+                        }
+                    }) { Text("Done") }
+                }
+            )
+        }
+
         // Show the add item dialog if needed
         if (showDialog) {
             AddItemDialog(
@@ -515,14 +653,18 @@ fun HomeScreen(
                             newItem.path != null &&
                             newItem.diskSizeGB > 0 &&
                             newItem.name.isNotEmpty()) {
-                            // Create disk image if mode is Disk
+                            // Create disk image if mode is Disk.
+                            val fixedImage = "${newItem.path}/${newItem.name}.img"
                             val diskImagePathResult = rootManager.createDiskImage(newItem.path, newItem.name, newItem.diskSizeGB)
                             if (diskImagePathResult.startsWith("Success:")) {
                                 val imagePath = diskImagePathResult.substring("Success:".length).trim()
-                                val diskItemWithImagePath = newItem.copy(path = imagePath)
+                                val diskItemWithImagePath = newItem.copy(
+                                    path = imagePath.ifBlank { newItem.path },
+                                    imageName = fixedImage
+                                )
                                 diskItemRepository.addDiskItem(diskItemWithImagePath)
                             } else {
-                                diskItemRepository.addDiskItem(newItem)
+                                diskItemRepository.addDiskItem(newItem.copy(imageName = fixedImage))
                             }
                         } else {
                             diskItemRepository.addDiskItem(newItem)

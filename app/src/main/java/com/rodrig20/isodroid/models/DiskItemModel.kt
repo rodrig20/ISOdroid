@@ -24,8 +24,18 @@ data class DiskItem(
     val isActive: Boolean = false,   // Whether the item is currently active/mounted
     val lunId: String? = null,       // LUN ID if the item is mounted
     val name: String = "",           // Display name for the item
-    val diskSizeGB: Double = 0.0     // Size of the disk in GB (for disk mode)
-)
+    val diskSizeGB: Double = 0.0,    // Size of the disk in GB (for disk mode)
+    // Per-LUN flags, editable only while ejected. Null readOnly = auto
+    // from mode (ISO ro, Disk rw), preserving pre-existing items on upgrade.
+    val readOnly: Boolean? = null,
+    val cdrom: Boolean = false,      // CD-ROM emulation (forces read-only)
+    // Fixed image file for Disk mode (folder/name.img at creation time).
+    // Display renames never touch the file; null = legacy fallback.
+    val imageName: String? = null
+) {
+    /** Effective read-only flag: explicit choice, else mode default. */
+    fun effectiveReadOnly(): Boolean = readOnly ?: !mode.equals("Disk", ignoreCase = true)
+}
 
 /**
  * Custom serializer for UUID to ensure proper serialization/deserialization
