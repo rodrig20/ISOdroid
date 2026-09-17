@@ -268,7 +268,7 @@ fun SettingsScreen(
  * Small caps section header, as in system Settings.
  */
 @Composable
-private fun SectionHeader(text: String) {
+fun SectionHeader(text: String) {
     Text(
         text = text,
         style = MaterialTheme.typography.labelLarge,
@@ -283,7 +283,7 @@ private fun SectionHeader(text: String) {
  * optional trailing control. Tapping fires onClick when enabled.
  */
 @Composable
-private fun PreferenceRow(
+fun PreferenceRow(
     title: String,
     summary: String? = null,
     icon: ImageVector? = null,

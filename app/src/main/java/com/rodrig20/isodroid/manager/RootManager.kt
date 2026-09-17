@@ -199,6 +199,26 @@ class RootManager(context: Context) {
     }
 
     /**
+     * Deletes a file or image from storage as root.
+     * For Disk-mode items pass the full image path (folder/name.img);
+     * only the file is removed, never its parent folder.
+     * @param path Absolute path of the file to delete
+     * @return "Success" or "Error: ..." for UI feedback
+     */
+    suspend fun deleteFile(path: String): String {
+        if (!isRooted) return "Error: Device is not rooted"
+        if (path.isBlank()) return "Error: Empty path"
+        val escaped = path.replace("'", "'\"'\"'")
+        val result = runAsRootForChecking(
+            listOf(
+                "rm -f '$escaped'",
+                "if [ -e '$escaped' ]; then echo FAILED; else echo DELETED; fi"
+            )
+        )
+        return if (result.trim() == "DELETED") "Success" else "Error: Could not delete file"
+    }
+
+    /**
      * Checks if the device has root access by running a simple command with su
      * @return True if the device is rooted, false otherwise
      */

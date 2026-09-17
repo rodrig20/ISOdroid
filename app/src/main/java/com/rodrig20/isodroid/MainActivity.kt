@@ -1,16 +1,18 @@
 package com.rodrig20.isodroid
 
 import android.app.Activity
+import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -20,21 +22,24 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -53,12 +58,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
 import androidx.core.view.WindowCompat
 import com.google.accompanist.systemuicontroller.rememberSystemUiController
 import com.rodrig20.isodroid.data.DiskItemRepository
@@ -66,9 +69,37 @@ import com.rodrig20.isodroid.data.SettingsRepository
 import com.rodrig20.isodroid.manager.RootManager
 import com.rodrig20.isodroid.models.DiskItem
 import com.rodrig20.isodroid.ui.theme.ISOdroidTheme
+import com.rodrig20.isodroid.utils.getDisplayName
+import com.rodrig20.isodroid.utils.getRealPathFromTreeUri
+import com.rodrig20.isodroid.utils.getRealPathFromURI
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.InternalSerializationApi
+import java.io.File
+
+/**
+ * Copies a content URI into app-private storage so the USB gadget (which
+ * needs a real file path, not a content:// URI) can use it. Returns the
+ * absolute path of the copy, or null when the content can't be read.
+ */
+private suspend fun copyUriToAppStorage(context: Context, uri: Uri): String? =
+    withContext(Dispatchers.IO) {
+        try {
+            val rawName = getDisplayName(context, uri)?.takeIf { it.isNotBlank() }
+                ?: "image_${System.currentTimeMillis()}.iso"
+            val safeName = File(rawName).name
+            val dir = File(context.filesDir, "images").apply { mkdirs() }
+            val out = File(dir, safeName)
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                out.outputStream().use { output -> input.copyTo(output) }
+            } ?: return@withContext null
+            out.absolutePath
+        } catch (_: Exception) {
+            null
+        }
+    }
 
 
 // Screen navigation sealed class to handle different screens in the app
@@ -262,47 +293,6 @@ fun NotRootedScreen() {
 }
 
 /**
- * Card component for enabling/disabling the USB gadget functionality
- * Provides a switch with descriptive text
- */
-@Composable
-fun AppEnablerCard(
-    isAppEnabled: Boolean, // Current state of the USB gadget
-    onCheckedChange: (Boolean) -> Unit, // Callback for when the switch is toggled
-    isRooted: Boolean, // Whether the device has root access
-    isBusy: Boolean = false // A script is running; switch locks with feedback
-) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Enable USB Gadget",
-                        style = MaterialTheme.typography.titleLarge
-                    )
-                    Text(
-                        text = if (isBusy) "Applying USB change..." else "Allow the app to control the USB gadget",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-                Switch(
-                    checked = isAppEnabled,
-                    onCheckedChange = onCheckedChange,
-                    enabled = isRooted && !isBusy
-                )
-            }
-            if (isBusy) {
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth().padding(top = 12.dp))
-            }
-        }
-    }
-}
-
-/**
  * Home screen of the application
  * Displays the app enabler card and list of disk items
  */
@@ -321,6 +311,10 @@ fun HomeScreen(
     // Observe disk items from the repository
     val itemList by diskItemRepository.diskItems.collectAsState(initial = emptyList())
     var showDialog by remember { mutableStateOf(false) }
+    // Item awaiting remove confirmation (null = no dialog).
+    var itemPendingRemove by remember { mutableStateOf<DiskItem?>(null) }
+    // Checked inside the dialog: also delete the file from storage.
+    var deleteFileToo by remember(itemPendingRemove) { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
 
     Scaffold(
@@ -336,93 +330,177 @@ fun HomeScreen(
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
         floatingActionButton = {
-            FloatingActionButton(onClick = {
-                if (isAppEnabled) {
-                    showDialog = true
-                }
-            }) {
+            FloatingActionButton(onClick = { showDialog = true }) {
                 Icon(Icons.Default.Add, contentDescription = "Add Item")
             }
         }
     ) { paddingValues ->
-        LazyColumn(
-            modifier = Modifier.padding(paddingValues),
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            // First item in the list is the app enabler card
+        LazyColumn(modifier = Modifier.padding(paddingValues)) {
+            item { SectionHeader("USB gadget") }
             item {
-                AppEnablerCard(
-                    isAppEnabled = isAppEnabled,
-                    onCheckedChange = onAppEnabledChange,
-                    isRooted = rootManager.isRooted,
-                    isBusy = isToggling
+                PreferenceRow(
+                    title = "Enable USB gadget",
+                    summary = if (isToggling) "Applying USB change..."
+                    else if (isAppEnabled) "Phone presents its LUNs to the PC"
+                    else "Turn the phone into a USB drive",
+                    enabled = rootManager.isRooted && !isToggling,
+                    trailing = {
+                        Switch(
+                            checked = isAppEnabled,
+                            onCheckedChange = onAppEnabledChange,
+                            enabled = rootManager.isRooted && !isToggling
+                        )
+                    }
                 )
+            }
+            item { SectionHeader("Disk images") }
+            if (itemList.isEmpty()) {
+                item {
+                    PreferenceRow(
+                        title = "No images yet",
+                        summary = "Tap + to add an ISO or disk image",
+                        enabled = false
+                    )
+                }
             }
             // Display all disk items in the list
             items(items = itemList, key = { it.id }) { item ->
-                ItemCard(
-                    item = item,
-                    isRooted = true,
-                    isAppEnabled = isAppEnabled,
-                    onRemove = {
-                        // Remove the disk item from the repository
-                        coroutineScope.launch { diskItemRepository.removeDiskItem(item) }
-                    },
-                    onToggle = { newItemState ->
-                        // Handle mounting/ejecting of the disk item
-                        coroutineScope.launch {
-                            var updatedItem: DiskItem
-                            if (newItemState) {
-                                // Mount the item if the new state is active
-                                val result = rootManager.mountItem(item.path ?: "", item.name, item.mode)
-                                if (result.startsWith("Success:")) {
-                                    val lunId = result.substring("Success:".length)
-                                    updatedItem = item.copy(isActive = true, lunId = lunId)
-                                } else {
-                                    snackbarHostState.showSnackbar(
-                                        result.ifBlank { "Error: Could not mount item" }
-                                    )
-                                    return@launch
-                                }
+                // Handle mounting/ejecting of the disk item
+                val onToggle = { newItemState: Boolean ->
+                    coroutineScope.launch {
+                        var updatedItem: DiskItem
+                        if (newItemState) {
+                            // Mount the item if the new state is active
+                            val result = rootManager.mountItem(item.path ?: "", item.name, item.mode)
+                            if (result.startsWith("Success:")) {
+                                val lunId = result.substring("Success:".length)
+                                updatedItem = item.copy(isActive = true, lunId = lunId)
                             } else {
-                                // Eject the item if the new state is inactive
-                                updatedItem = if (item.lunId != null) {
-                                    val lunId = item.lunId
-                                    val result = rootManager.ejectItem(lunId)
-                                    if (result.startsWith("Success:")) {
-                                        item.copy(isActive = false, lunId = null)
-                                    } else {
-                                        // Host holds the LUN (PREVENT-ALLOW MEDIUM
-                                        // REMOVAL): offer a per-LUN force eject that
-                                        // leaves the other LUNs serving.
-                                        val action = snackbarHostState.showSnackbar(
-                                            message = result.ifBlank { "Error: Could not eject item" },
-                                            actionLabel = "Force"
-                                        )
-                                        if (action == SnackbarResult.ActionPerformed) {
-                                            val forceResult = rootManager.forceEjectItem(lunId)
-                                            if (forceResult.startsWith("Success:")) {
-                                                item.copy(isActive = false, lunId = null)
-                                            } else {
-                                                snackbarHostState.showSnackbar(
-                                                    forceResult.ifBlank { "Error: Force eject failed" }
-                                                )
-                                                return@launch
-                                            }
+                                snackbarHostState.showSnackbar(
+                                    result.ifBlank { "Error: Could not mount item" }
+                                )
+                                return@launch
+                            }
+                        } else {
+                            // Eject the item if the new state is inactive
+                            updatedItem = if (item.lunId != null) {
+                                val lunId = item.lunId
+                                val result = rootManager.ejectItem(lunId)
+                                if (result.startsWith("Success:")) {
+                                    item.copy(isActive = false, lunId = null)
+                                } else {
+                                    // Host holds the LUN (PREVENT-ALLOW MEDIUM
+                                    // REMOVAL): offer a per-LUN force eject that
+                                    // leaves the other LUNs serving.
+                                    val action = snackbarHostState.showSnackbar(
+                                        message = result.ifBlank { "Error: Could not eject item" },
+                                        actionLabel = "Force"
+                                    )
+                                    if (action == SnackbarResult.ActionPerformed) {
+                                        val forceResult = rootManager.forceEjectItem(lunId)
+                                        if (forceResult.startsWith("Success:")) {
+                                            item.copy(isActive = false, lunId = null)
                                         } else {
+                                            snackbarHostState.showSnackbar(
+                                                forceResult.ifBlank { "Error: Force eject failed" }
+                                            )
                                             return@launch
                                         }
+                                    } else {
+                                        return@launch
                                     }
-                                } else {
-                                    item.copy(isActive = false, lunId = null)
                                 }
+                            } else {
+                                item.copy(isActive = false, lunId = null)
                             }
-                            diskItemRepository.updateDiskItem(updatedItem)
+                        }
+                        diskItemRepository.updateDiskItem(updatedItem)
+                    }
+                }
+                PreferenceRow(
+                    title = item.name.ifBlank { item.mode },
+                    summary = buildString {
+                        append(item.mode)
+                        item.path?.let { fullPath ->
+                            val fileName = Uri.parse(fullPath).lastPathSegment?.split("/")?.last() ?: fullPath
+                            append(" · $fileName")
+                        }
+                        item.lunId?.let { append(" · LUN $it") }
+                    },
+                    trailing = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            // Remove opens a confirmation: list only, or list + file
+                            // Needs no gadget (list edit, root rm); only blocked
+                            IconButton(
+                                onClick = { itemPendingRemove = item },
+                                enabled = !item.isActive
+                            ) {
+                                Icon(Icons.Default.Delete, contentDescription = "Remove")
+                            }
+                            Switch(
+                                checked = item.isActive,
+                                onCheckedChange = { onToggle(it) },
+                                enabled = isAppEnabled
+                            )
                         }
                     }
                 )
             }
+            // Bottom spacer so the + button never covers the last row.
+            item {
+                Spacer(modifier = Modifier.height(88.dp))
+            }
+        }
+
+        // Remove confirmation: list only, list + file, or cancel.
+        itemPendingRemove?.let { pending ->
+            // Disk items store the folder; the image itself is folder/name.img.
+            val targetFile = if (pending.mode.equals("Disk", ignoreCase = true) && pending.path != null) {
+                "${pending.path}/${pending.name}.img"
+            } else {
+                pending.path
+            }
+            AlertDialog(
+                onDismissRequest = { itemPendingRemove = null },
+                title = { Text(pending.name.ifBlank { pending.mode }) },
+                text = {
+                    Column {
+                        Text("Remove this item from the list?")
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(top = 8.dp)
+                        ) {
+                            Checkbox(
+                                checked = deleteFileToo,
+                                onCheckedChange = { deleteFileToo = it }
+                            )
+                            Text(
+                                text = "Delete from storage",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        itemPendingRemove = null
+                        coroutineScope.launch {
+                            if (deleteFileToo && !targetFile.isNullOrBlank()) {
+                                val deleted = rootManager.deleteFile(targetFile)
+                                if (!deleted.startsWith("Success")) {
+                                    snackbarHostState.showSnackbar(deleted)
+                                    return@launch
+                                }
+                            }
+                            diskItemRepository.removeDiskItem(pending)
+                        }
+                    }) { Text("Remove") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { itemPendingRemove = null }) { Text("Cancel") }
+                }
+            )
         }
 
         // Show the add item dialog if needed
@@ -458,90 +536,71 @@ fun HomeScreen(
 }
 
 /**
- * Card component to display a single disk item
- * Shows information about the disk item and provides toggle/remove actions
- */
-@OptIn(InternalSerializationApi::class)
-@Composable
-fun ItemCard(
-    item: DiskItem, // The disk item to display
-    isRooted: Boolean, // Whether the device has root access
-    isAppEnabled: Boolean, // Whether the app is enabled
-    onRemove: (DiskItem) -> Unit, // Callback for removing the item
-    onToggle: (Boolean) -> Unit // Callback for toggling the item state
-) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                // Display the item name or mode if name is blank
-                Text(
-                    text = item.name.ifBlank { "Mode: ${item.mode}" },
-                    style = MaterialTheme.typography.titleMedium
-                )
-                // Switch to enable/disable the item
-                Switch(
-                    checked = item.isActive,
-                    onCheckedChange = { onToggle(it) },
-                    enabled = isRooted && isAppEnabled
-                )
-            }
-            // Display the file path if available
-            item.path?.let { fullPath ->
-                val fileName = Uri.parse(fullPath).lastPathSegment?.split("/")?.last() ?: fullPath
-                Text(
-                    text = "Path: $fileName",
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-            }
-            // Display the LUN ID if available
-            item.lunId?.let { lunId ->
-                Text(
-                    text = "LUN: $lunId",
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(top = 2.dp),
-                    color = Color.Gray
-                )
-            }
-            // Action buttons row
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 8.dp),
-                horizontalArrangement = Arrangement.End
-            ) {
-                // Remove button is only enabled when not active and app is enabled
-                IconButton(onClick = { onRemove(item) }, enabled = isRooted && isAppEnabled && !item.isActive) {
-                    Icon(Icons.Default.Delete, contentDescription = "Remove")
-                }
-            }
-        }
-    }
-}
-
-
-/**
  * Dialog for adding a new disk item
  * Allows users to specify whether it's an ISO or Disk image and provide required information
  */
-@OptIn(InternalSerializationApi::class)
+@OptIn(InternalSerializationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun AddItemDialog(
     rootManager: RootManager, // Manager for root operations
     onDismiss: () -> Unit, // Callback for dismissing the dialog
     onItemAction: (DiskItem) -> Unit // Callback for when an item is added
 ) {
-    LocalContext.current
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var selectedMode by remember { mutableStateOf("ISO") } // Selected mode: ISO or Disk
     var path by remember { mutableStateOf<String?>(null) } // File or folder path
     var name by remember { mutableStateOf("") } // Display name for the item
     var diskSizeGB by remember { mutableStateOf(0.0) } // Size of the disk in GB
     var isPathValid by remember { mutableStateOf(false) } // Whether the path is valid
     var isPathValidationLoading by remember { mutableStateOf(false) } // Whether path validation is in progress
+    var isResolving by remember { mutableStateOf(false) } // Reading/copying a picked file
+    var resolveNote by remember { mutableStateOf<String?>(null) } // Picker outcome hint
+
+    // System file picker: the USB gadget needs a real file path, so picked content is resolved to a path when possible, else copied into app storage; the display name is pre-filled from the file.
+    val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val picked = uri ?: return@rememberLauncherForActivityResult
+        isResolving = true
+        resolveNote = null
+        scope.launch(Dispatchers.IO) {
+            val resolved = getRealPathFromURI(context, picked)
+            if (resolved != null) {
+                withContext(Dispatchers.Main) {
+                    path = resolved
+                    if (name.isBlank()) {
+                        getDisplayName(context, picked)?.let { name = it }
+                    }
+                    isResolving = false
+                }
+            } else {
+                val copied = copyUriToAppStorage(context, picked)
+                withContext(Dispatchers.Main) {
+                    if (copied != null) {
+                        path = copied
+                        if (name.isBlank()) {
+                            getDisplayName(context, picked)?.let { name = it }
+                        }
+                        resolveNote = "Copied into app storage"
+                    } else {
+                        resolveNote = "Could not read this file"
+                    }
+                    isResolving = false
+                }
+            }
+        }
+    }
+
+    // System folder picker for Disk mode: the folder holds the created image; tree URIs only resolve on the primary volume, otherwise manual input is needed.
+    val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        val picked = uri ?: return@rememberLauncherForActivityResult
+        val resolved = getRealPathFromTreeUri(context, picked)
+        if (resolved != null) {
+            path = resolved
+            resolveNote = null
+        } else {
+            resolveNote = "Could not resolve folder, type it manually"
+        }
+    }
 
     // Validate the path whenever it changes using RootManager
     LaunchedEffect(path, selectedMode) {
@@ -558,30 +617,36 @@ fun AddItemDialog(
         }
     }
 
-    Dialog(onDismissRequest = onDismiss) {
-        Card {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    text = "Add New Item",
-                    style = MaterialTheme.typography.headlineSmall
-                )
-                Spacer(modifier = Modifier.height(16.dp))
+    // Enable the add button based on validation criteria
+    val isAddButtonEnabled = when (selectedMode) {
+        "ISO" -> !path.isNullOrBlank() && name.isNotBlank() && isPathValid && !isResolving
+        "Disk" -> !path.isNullOrBlank() && diskSizeGB > 0 && name.isNotBlank() && isPathValid
+        else -> name.isNotBlank()
+    }
 
-                // Radio buttons to select ISO or Disk mode
-                Row {
-                    RadioButton(
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add item") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Mode selector chips instead of radio buttons
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
                         selected = selectedMode == "ISO",
-                        onClick = { selectedMode = "ISO" }
+                        onClick = { selectedMode = "ISO" },
+                        label = { Text("ISO") },
+                        modifier = Modifier.weight(1f)
                     )
-                    Text("ISO", modifier = Modifier.align(Alignment.CenterVertically))
-                    Spacer(modifier = Modifier.width(16.dp))
-                    RadioButton(
+                    FilterChip(
                         selected = selectedMode == "Disk",
-                        onClick = { selectedMode = "Disk" }
+                        onClick = { selectedMode = "Disk" },
+                        label = { Text("Disk") },
+                        modifier = Modifier.weight(1f)
                     )
-                    Text("Disk", modifier = Modifier.align(Alignment.CenterVertically))
                 }
-                Spacer(modifier = Modifier.height(16.dp))
 
                 // Display name input field
                 OutlinedTextField(
@@ -600,7 +665,6 @@ fun AddItemDialog(
                     },
                     modifier = Modifier.fillMaxWidth()
                 )
-                Spacer(modifier = Modifier.height(8.dp))
 
                 // Show different inputs based on selected mode
                 if (selectedMode == "ISO") {
@@ -637,6 +701,14 @@ fun AddItemDialog(
                             },
                             modifier = Modifier.fillMaxWidth()
                         )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedButton(
+                            onClick = { pickFile.launch(arrayOf("*/*")) },
+                            enabled = !isResolving,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(if (isResolving) "Reading file..." else "Browse files")
+                        }
                     }
                 } else if (selectedMode == "Disk") {
                     Column {
@@ -673,6 +745,12 @@ fun AddItemDialog(
                             modifier = Modifier.fillMaxWidth()
                         )
                         Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedButton(
+                            onClick = { pickFolder.launch(null) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Browse folders")
+                        }
                         // Disk size input for disk mode
                         OutlinedTextField(
                             value = if (diskSizeGB > 0) diskSizeGB.toString() else "",
@@ -697,42 +775,39 @@ fun AddItemDialog(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Action buttons
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End
-                ) {
-                    TextButton(onClick = onDismiss) {
-                        Text("Cancel")
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    // Enable the add button based on validation criteria
-                    val isAddButtonEnabled = when (selectedMode) {
-                        "ISO" -> !path.isNullOrBlank() && name.isNotBlank() && isPathValid
-                        "Disk" -> !path.isNullOrBlank() && diskSizeGB > 0 && name.isNotBlank() && isPathValid
-                        else -> name.isNotBlank()
-                    }
-                    Button(
-                        onClick = {
-                            // Create and add the new item
-                            val newItem = DiskItem(
-                                mode = selectedMode,
-                                path = path,
-                                name = name,
-                                diskSizeGB = diskSizeGB
-                            )
-                            onItemAction(newItem)
-                        },
-                        enabled = isAddButtonEnabled
-                    ) {
-                        Text("Add")
-                    }
+                // Picker outcome hint (copied into app storage, errors, ...).
+                resolveNote?.let { note ->
+                    Text(
+                        text = note,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    // Create and add the new item
+                    val newItem = DiskItem(
+                        mode = selectedMode,
+                        path = path,
+                        name = name,
+                        diskSizeGB = diskSizeGB
+                    )
+                    onItemAction(newItem)
+                },
+                enabled = isAddButtonEnabled
+            ) {
+                Text("Add")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
         }
-    }
+    )
 }
 
 /**
