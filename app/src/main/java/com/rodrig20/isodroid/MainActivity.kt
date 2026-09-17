@@ -13,7 +13,6 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -34,7 +33,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -57,7 +55,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.tooling.preview.Preview
@@ -294,47 +291,6 @@ fun NotRootedScreen() {
 }
 
 /**
- * Card component for enabling/disabling the USB gadget functionality
- * Provides a switch with descriptive text
- */
-@Composable
-fun AppEnablerCard(
-    isAppEnabled: Boolean, // Current state of the USB gadget
-    onCheckedChange: (Boolean) -> Unit, // Callback for when the switch is toggled
-    isRooted: Boolean, // Whether the device has root access
-    isBusy: Boolean = false // A script is running; switch locks with feedback
-) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Enable USB Gadget",
-                        style = MaterialTheme.typography.titleLarge
-                    )
-                    Text(
-                        text = if (isBusy) "Applying USB change..." else "Allow the app to control the USB gadget",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-                Switch(
-                    checked = isAppEnabled,
-                    onCheckedChange = onCheckedChange,
-                    enabled = isRooted && !isBusy
-                )
-            }
-            if (isBusy) {
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth().padding(top = 12.dp))
-            }
-        }
-    }
-}
-
-/**
  * Home screen of the application
  * Displays the app enabler card and list of disk items
  */
@@ -373,80 +329,115 @@ fun HomeScreen(
             }
         }
     ) { paddingValues ->
-        LazyColumn(
-            modifier = Modifier.padding(paddingValues),
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            // First item in the list is the app enabler card
+        LazyColumn(modifier = Modifier.padding(paddingValues)) {
+            item { SectionHeader("USB gadget") }
             item {
-                AppEnablerCard(
-                    isAppEnabled = isAppEnabled,
-                    onCheckedChange = onAppEnabledChange,
-                    isRooted = rootManager.isRooted,
-                    isBusy = isToggling
+                PreferenceRow(
+                    title = "Enable USB gadget",
+                    summary = if (isToggling) "Applying USB change..."
+                    else if (isAppEnabled) "Phone presents its LUNs to the PC"
+                    else "Turn the phone into a USB drive",
+                    enabled = rootManager.isRooted && !isToggling,
+                    trailing = {
+                        Switch(
+                            checked = isAppEnabled,
+                            onCheckedChange = onAppEnabledChange,
+                            enabled = rootManager.isRooted && !isToggling
+                        )
+                    }
                 )
+            }
+            item { SectionHeader("Disk images") }
+            if (itemList.isEmpty()) {
+                item {
+                    PreferenceRow(
+                        title = "No images yet",
+                        summary = "Tap + to add an ISO or disk image",
+                        enabled = false
+                    )
+                }
             }
             // Display all disk items in the list
             items(items = itemList, key = { it.id }) { item ->
-                ItemCard(
-                    item = item,
-                    isRooted = true,
-                    isAppEnabled = isAppEnabled,
-                    onRemove = {
-                        // Remove the disk item from the repository
-                        coroutineScope.launch { diskItemRepository.removeDiskItem(item) }
-                    },
-                    onToggle = { newItemState ->
-                        // Handle mounting/ejecting of the disk item
-                        coroutineScope.launch {
-                            var updatedItem: DiskItem
-                            if (newItemState) {
-                                // Mount the item if the new state is active
-                                val result = rootManager.mountItem(item.path ?: "", item.name, item.mode)
-                                if (result.startsWith("Success:")) {
-                                    val lunId = result.substring("Success:".length)
-                                    updatedItem = item.copy(isActive = true, lunId = lunId)
-                                } else {
-                                    snackbarHostState.showSnackbar(
-                                        result.ifBlank { "Error: Could not mount item" }
-                                    )
-                                    return@launch
-                                }
+                // Handle mounting/ejecting of the disk item
+                val onToggle = { newItemState: Boolean ->
+                    coroutineScope.launch {
+                        var updatedItem: DiskItem
+                        if (newItemState) {
+                            // Mount the item if the new state is active
+                            val result = rootManager.mountItem(item.path ?: "", item.name, item.mode)
+                            if (result.startsWith("Success:")) {
+                                val lunId = result.substring("Success:".length)
+                                updatedItem = item.copy(isActive = true, lunId = lunId)
                             } else {
-                                // Eject the item if the new state is inactive
-                                updatedItem = if (item.lunId != null) {
-                                    val lunId = item.lunId
-                                    val result = rootManager.ejectItem(lunId)
-                                    if (result.startsWith("Success:")) {
-                                        item.copy(isActive = false, lunId = null)
-                                    } else {
-                                        // Host holds the LUN (PREVENT-ALLOW MEDIUM
-                                        // REMOVAL): offer a per-LUN force eject that
-                                        // leaves the other LUNs serving.
-                                        val action = snackbarHostState.showSnackbar(
-                                            message = result.ifBlank { "Error: Could not eject item" },
-                                            actionLabel = "Force"
-                                        )
-                                        if (action == SnackbarResult.ActionPerformed) {
-                                            val forceResult = rootManager.forceEjectItem(lunId)
-                                            if (forceResult.startsWith("Success:")) {
-                                                item.copy(isActive = false, lunId = null)
-                                            } else {
-                                                snackbarHostState.showSnackbar(
-                                                    forceResult.ifBlank { "Error: Force eject failed" }
-                                                )
-                                                return@launch
-                                            }
+                                snackbarHostState.showSnackbar(
+                                    result.ifBlank { "Error: Could not mount item" }
+                                )
+                                return@launch
+                            }
+                        } else {
+                            // Eject the item if the new state is inactive
+                            updatedItem = if (item.lunId != null) {
+                                val lunId = item.lunId
+                                val result = rootManager.ejectItem(lunId)
+                                if (result.startsWith("Success:")) {
+                                    item.copy(isActive = false, lunId = null)
+                                } else {
+                                    // Host holds the LUN (PREVENT-ALLOW MEDIUM
+                                    // REMOVAL): offer a per-LUN force eject that
+                                    // leaves the other LUNs serving.
+                                    val action = snackbarHostState.showSnackbar(
+                                        message = result.ifBlank { "Error: Could not eject item" },
+                                        actionLabel = "Force"
+                                    )
+                                    if (action == SnackbarResult.ActionPerformed) {
+                                        val forceResult = rootManager.forceEjectItem(lunId)
+                                        if (forceResult.startsWith("Success:")) {
+                                            item.copy(isActive = false, lunId = null)
                                         } else {
+                                            snackbarHostState.showSnackbar(
+                                                forceResult.ifBlank { "Error: Force eject failed" }
+                                            )
                                             return@launch
                                         }
+                                    } else {
+                                        return@launch
                                     }
-                                } else {
-                                    item.copy(isActive = false, lunId = null)
                                 }
+                            } else {
+                                item.copy(isActive = false, lunId = null)
                             }
-                            diskItemRepository.updateDiskItem(updatedItem)
+                        }
+                        diskItemRepository.updateDiskItem(updatedItem)
+                    }
+                }
+                PreferenceRow(
+                    title = item.name.ifBlank { item.mode },
+                    summary = buildString {
+                        append(item.mode)
+                        item.path?.let { fullPath ->
+                            val fileName = Uri.parse(fullPath).lastPathSegment?.split("/")?.last() ?: fullPath
+                            append(" · $fileName")
+                        }
+                        item.lunId?.let { append(" · LUN $it") }
+                    },
+                    trailing = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            // Remove is only enabled when not active and app is enabled
+                            IconButton(
+                                onClick = {
+                                    // Remove the disk item from the repository
+                                    coroutineScope.launch { diskItemRepository.removeDiskItem(item) }
+                                },
+                                enabled = isAppEnabled && !item.isActive
+                            ) {
+                                Icon(Icons.Default.Delete, contentDescription = "Remove")
+                            }
+                            Switch(
+                                checked = item.isActive,
+                                onCheckedChange = { onToggle(it) },
+                                enabled = isAppEnabled
+                            )
                         }
                     }
                 )
@@ -484,73 +475,6 @@ fun HomeScreen(
         }
     }
 }
-
-/**
- * Card component to display a single disk item
- * Shows information about the disk item and provides toggle/remove actions
- */
-@OptIn(InternalSerializationApi::class)
-@Composable
-fun ItemCard(
-    item: DiskItem, // The disk item to display
-    isRooted: Boolean, // Whether the device has root access
-    isAppEnabled: Boolean, // Whether the app is enabled
-    onRemove: (DiskItem) -> Unit, // Callback for removing the item
-    onToggle: (Boolean) -> Unit // Callback for toggling the item state
-) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                // Display the item name or mode if name is blank
-                Text(
-                    text = item.name.ifBlank { "Mode: ${item.mode}" },
-                    style = MaterialTheme.typography.titleMedium
-                )
-                // Switch to enable/disable the item
-                Switch(
-                    checked = item.isActive,
-                    onCheckedChange = { onToggle(it) },
-                    enabled = isRooted && isAppEnabled
-                )
-            }
-            // Display the file path if available
-            item.path?.let { fullPath ->
-                val fileName = Uri.parse(fullPath).lastPathSegment?.split("/")?.last() ?: fullPath
-                Text(
-                    text = "Path: $fileName",
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-            }
-            // Display the LUN ID if available
-            item.lunId?.let { lunId ->
-                Text(
-                    text = "LUN: $lunId",
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(top = 2.dp),
-                    color = Color.Gray
-                )
-            }
-            // Action buttons row
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 8.dp),
-                horizontalArrangement = Arrangement.End
-            ) {
-                // Remove button is only enabled when not active and app is enabled
-                IconButton(onClick = { onRemove(item) }, enabled = isRooted && isAppEnabled && !item.isActive) {
-                    Icon(Icons.Default.Delete, contentDescription = "Remove")
-                }
-            }
-        }
-    }
-}
-
 
 /**
  * Dialog for adding a new disk item
