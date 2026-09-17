@@ -1,10 +1,12 @@
 package com.rodrig20.isodroid.manager
 
 import android.content.Context
+import com.rodrig20.isodroid.data.SettingsRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.InternalSerializationApi
 import java.io.BufferedReader
@@ -82,9 +84,21 @@ class RootManager(context: Context) {
     suspend fun turnOnApp(): String {
         if (!isRooted) return "Error: Device is not rooted"
         val maxDevices = getMaxDevices()
+        // USB identity shown to the host (empty fields keep Android defaults).
+        val identity = SettingsRepository(appContext).usbIdentityFlow.first()
 
         // Scripts print a single trailing status line ("Success..." / "Error: ..."); parse the last non-blank line.
-        val result = resultLine(runScriptAsRoot("turn_on_gadget.sh", listOf(maxDevices.toString())))
+        val result = resultLine(
+            runScriptAsRoot(
+                "turn_on_gadget.sh",
+                listOf(
+                    maxDevices.toString(),
+                    identity.manufacturer,
+                    identity.product,
+                    identity.serial
+                )
+            )
+        )
         if (result.startsWith("Success")) {
             _isAppEnabled.value = true
             // "Success" or "Success:waiting-host" (bound, host not enumerated yet).

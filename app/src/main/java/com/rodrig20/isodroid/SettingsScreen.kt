@@ -15,6 +15,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Divider
@@ -48,6 +49,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.rodrig20.isodroid.data.SettingsRepository
+import com.rodrig20.isodroid.data.UsbIdentity
 import kotlinx.coroutines.launch
 
 /**
@@ -66,6 +68,8 @@ fun SettingsScreen(
 
     // Observe the maximum number of devices from the settings repository
     val maxDevices by settingsRepository.maxDevicesFlow.collectAsState(initial = 1)
+    // USB identity strings shown to the host (empty = Android default).
+    val usbIdentity by settingsRepository.usbIdentityFlow.collectAsState(initial = UsbIdentity())
     // Observe the charging suspension state from the root manager
     val isChargingSuspended by rootManager.isChargingSuspendedFlow.collectAsState()
     // False on kernels without a known charging-control node.
@@ -78,6 +82,11 @@ fun SettingsScreen(
     // LUN limit dialog state (text is committed with Set, not per keystroke).
     var showLunDialog by remember { mutableStateOf(false) }
     var dialogText by remember { mutableStateOf("") }
+    // USB identity dialog state (empty field = keep Android default).
+    var showIdentityDialog by remember { mutableStateOf(false) }
+    var dialogManufacturer by remember { mutableStateOf("") }
+    var dialogProduct by remember { mutableStateOf("") }
+    var dialogSerial by remember { mutableStateOf("") }
     // Kernel LUN probe state.
     var isProbing by remember { mutableStateOf(false) }
     var probedMax by remember { mutableStateOf<Int?>(null) }
@@ -86,6 +95,13 @@ fun SettingsScreen(
     LaunchedEffect(Unit) {
         rootManager.getChargingState()
     }
+
+    // One-line summary of the USB identity (blank fields show defaults).
+    val usbIdentitySummary = listOf(
+        usbIdentity.manufacturer,
+        usbIdentity.product,
+        usbIdentity.serial
+    ).filter { it.isNotBlank() }.joinToString(" · ").ifBlank { "Android defaults" }
 
     // System back button/gesture returns to the home screen.
     BackHandler {
@@ -126,6 +142,20 @@ fun SettingsScreen(
                 onClick = {
                     dialogText = maxDevices.toString()
                     showLunDialog = true
+                }
+            )
+            Divider()
+            PreferenceRow(
+                icon = Icons.Default.Usb,
+                title = "USB identity",
+                summary = if (isAppEnabled) "Disable the USB gadget to change ($usbIdentitySummary)"
+                else usbIdentitySummary,
+                enabled = !isAppEnabled,
+                onClick = {
+                    dialogManufacturer = usbIdentity.manufacturer
+                    dialogProduct = usbIdentity.product
+                    dialogSerial = usbIdentity.serial
+                    showIdentityDialog = true
                 }
             )
             Divider()
@@ -232,6 +262,62 @@ fun SettingsScreen(
                 },
                 dismissButton = {
                     TextButton(onClick = { showLunDialog = false }) { Text("Cancel") }
+                }
+            )
+        }
+
+        // USB identity editor dialog: blank fields keep Android defaults; changes apply on next enable and a new serial appears as a new device to the PC.
+        if (showIdentityDialog) {
+            AlertDialog(
+                onDismissRequest = { showIdentityDialog = false },
+                title = { Text("USB identity") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = dialogManufacturer,
+                            onValueChange = { dialogManufacturer = it },
+                            label = { Text("Manufacturer") },
+                            placeholder = { Text("Android default") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = dialogProduct,
+                            onValueChange = { dialogProduct = it },
+                            label = { Text("Product") },
+                            placeholder = { Text("Android default") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = dialogSerial,
+                            onValueChange = { dialogSerial = it },
+                            label = { Text("Serial number") },
+                            placeholder = { Text("Android default") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        Text(
+                            text = "Applies on next enable. A new serial shows up as a new device on the PC.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showIdentityDialog = false
+                        coroutineScope.launch {
+                            settingsRepository.setUsbIdentity(
+                                dialogManufacturer,
+                                dialogProduct,
+                                dialogSerial
+                            )
+                        }
+                    }) { Text("Set") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showIdentityDialog = false }) { Text("Cancel") }
                 }
             )
         }
