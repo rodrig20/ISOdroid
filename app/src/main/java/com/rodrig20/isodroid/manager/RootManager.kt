@@ -1,7 +1,9 @@
 package com.rodrig20.isodroid.manager
 
 import android.content.Context
+import android.os.SystemClock
 import com.rodrig20.isodroid.data.SettingsRepository
+import com.rodrig20.isodroid.util.IsoLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -12,16 +14,9 @@ import kotlinx.serialization.InternalSerializationApi
 import java.io.BufferedReader
 import java.io.DataOutputStream
 import java.io.InputStreamReader
+import java.util.zip.CRC32
 
-/**
- * Wraps a value so POSIX sh treats it as a single literal argument.
- *
- * Every root command goes through `su -c "<string>"`, so anything derived from
- * a user-chosen file name (apostrophes are common: `Rock'n'Roll.iso`) would
- * otherwise close the quoted string and run as root. Inside single quotes
- * every character is literal, so an embedded quote must close the string,
- * emit an escaped quote, and reopen: ' -> '"'"'
- */
+/** Escape a value so it stays one literal shell argument. */
 private fun shellQuote(value: String): String =
     "'" + value.replace("'", "'\"'\"'") + "'"
 
@@ -84,6 +79,7 @@ class RootManager(context: Context) {
         val result = runScriptAsRoot("check_gadget_status.sh")
         // Update the app enabled state based on the command output
         _isAppEnabled.value = result.trim().equals("true", ignoreCase = true)
+        IsoLog.i("state probe: gadget status=${result.trim()} rooted=$isRooted maxDevices=${getMaxDevices()}")
     }
 
     /**
@@ -114,16 +110,20 @@ class RootManager(context: Context) {
         if (result.startsWith("Success")) {
             _isAppEnabled.value = true
             // "Success" or "Success:waiting-host" (bound, host not enumerated yet).
+            IsoLog.i("turnOnApp: -> $result")
             return result
         }
         // A transient HAL rebind may have settled in our favour; do one read-only re-check before giving up.
         delay(1000)
         val lateCheck = resultLine(runScriptAsRoot("check_gadget_status.sh"))
+        IsoLog.w("turnOnApp: script reported ($result); late re-check=$lateCheck")
         if (lateCheck.equals("true", ignoreCase = true)) {
             _isAppEnabled.value = true
+            IsoLog.i("turnOnApp: recovered -> Success, ${linkStatus()}")
             return "Success"
         }
         _isAppEnabled.value = false
+        IsoLog.e("turnOnApp: failed -> ${result.ifBlank { "Error: Could not enable USB gadget" }}, ${linkStatus()}")
         return result.ifBlank { "Error: Could not enable USB gadget" }
     }
 
@@ -138,6 +138,7 @@ class RootManager(context: Context) {
         val result = resultLine(runScriptAsRoot("turn_off_gadget.sh"))
         // Always reflect off locally; report script errors to the UI.
         _isAppEnabled.value = false
+        IsoLog.i("turnOffApp: -> ${result.ifBlank { "Success" }}")
         return result.ifBlank { "Success" }
     }
 
@@ -166,8 +167,8 @@ class RootManager(context: Context) {
     ): String {
         if (!isRooted) return "Error: Device is not rooted"
 
-        // Encode the display name to handle special characters
-        val encodedName = displayName.replace("'", "'\"'\"'")
+        // Display names are quoted by shellQuote inside runScriptAsRoot;
+        // escaping here too would double-quote any apostrophe.
         // Disk images live at a fixed path from creation time; display
         // renames must not move them, so prefer the stored path.
         val actualFilePath = if (mode.equals("Disk", ignoreCase = true)) {
@@ -183,7 +184,9 @@ class RootManager(context: Context) {
         }
         val cdromArg = if (cdrom) "1" else "0"
 
-        return resultLine(runScriptAsRoot("mount_item.sh", listOf(filePath, encodedName, mode, actualFilePath, (maxDevices - 1).toString(), roArg, cdromArg)))
+        val result = resultLine(runScriptAsRoot("mount_item.sh", listOf(filePath, displayName, mode, actualFilePath, (maxDevices - 1).toString(), roArg, cdromArg)))
+        IsoLog.i("mount: mode=$mode cdrom=$cdrom ro=${roArg.ifEmpty { "auto" }} -> $result")
+        return result
     }
 
     /**
@@ -225,7 +228,9 @@ class RootManager(context: Context) {
         if (!isRooted) return "Error: Device is not rooted"
         val cleanLunId = lunId.trim()
 
-        return resultLine(runScriptAsRoot("eject_item.sh", listOf(cleanLunId)))
+        val result = resultLine(runScriptAsRoot("eject_item.sh", listOf(cleanLunId)))
+        IsoLog.i("eject: lun=$cleanLunId -> $result")
+        return result
     }
 
     /**
@@ -240,7 +245,9 @@ class RootManager(context: Context) {
         if (!isRooted) return "Error: Device is not rooted"
         val cleanLunId = lunId.trim()
 
-        return resultLine(runScriptAsRoot("force_eject_item.sh", listOf(cleanLunId)))
+        val result = resultLine(runScriptAsRoot("force_eject_item.sh", listOf(cleanLunId)))
+        IsoLog.i("forceEject: lun=$cleanLunId -> $result")
+        return result
     }
 
     /**
@@ -251,7 +258,9 @@ class RootManager(context: Context) {
     suspend fun probeMaxLuns(): String {
         if (!isRooted) return "Error: Device is not rooted"
 
-        return resultLine(runScriptAsRoot("probe_max_luns.sh"))
+        val result = resultLine(runScriptAsRoot("probe_max_luns.sh"))
+        IsoLog.i("probeMaxLuns: -> $result")
+        return result
     }
 
     /**
@@ -271,7 +280,13 @@ class RootManager(context: Context) {
                 "if [ -e $quoted ]; then echo FAILED; else echo DELETED; fi"
             )
         )
-        return if (result.trim() == "DELETED") "Success" else "Error: Could not delete file"
+        return if (result.trim() == "DELETED") {
+            IsoLog.i("deleteFile: $path -> deleted")
+            "Success"
+        } else {
+            IsoLog.w("deleteFile: $path -> failed (raw=$result)")
+            "Error: Could not delete file"
+        }
     }
 
     /**
@@ -282,7 +297,9 @@ class RootManager(context: Context) {
     suspend fun probeFsTools(): String {
         if (!isRooted) return "Error: Device is not rooted"
 
-        return resultLine(runScriptAsRoot("probe_fs_tools.sh"))
+        val result = resultLine(runScriptAsRoot("probe_fs_tools.sh"))
+        IsoLog.i("probeFsTools: -> $result")
+        return result
     }
 
     /**
@@ -406,6 +423,69 @@ class RootManager(context: Context) {
     }
 
     /**
+     * Stable short fingerprint of a script's body.
+     *
+     * Bug reports arrive with the app version but not with the script version,
+     * and the scripts are the part that actually differs between builds and
+     * devices. Logging this lets a report be matched to the exact script that
+     * ran without shipping the whole body to logcat.
+     */
+    private fun scriptFingerprint(content: String): String {
+        val crc = CRC32()
+        crc.update(content.toByteArray())
+        return "%08x(%d bytes)".format(crc.value, content.length)
+    }
+
+    /**
+     * Logs the root-visible facts that decide whether this device can run the
+     * gadget: kernel release, ConfigFS root, UDC controller, LUN ceiling,
+     * available mkfs tools and the charging backend.
+     *
+     * These are the values that differ between a working and a broken setup,
+     * and they are exactly what a bug report needs. Without them the log says
+     * "Error: ConfigFS usb_gadget not found" with no hint of which half failed.
+     * Every probe is read-only and leaves the gadget and ConfigFS untouched.
+     */
+    suspend fun logRootEnvironment() {
+        if (!isRooted) return
+        IsoLog.i("env: kernel=${unameRelease()} ${linkStatus()}")
+        // Both probes log their own results; probing LUNs uses a throwaway
+        // unbound function instance, so it is safe to run while the gadget is on.
+        probeMaxLuns()
+        probeFsTools()
+    }
+
+    /** Kernel release string, or "unknown" when it cannot be read. */
+    private suspend fun unameRelease(): String =
+        runAsRootForChecking(listOf("uname -r")).trim().ifEmpty { "unknown" }
+
+    /**
+     * One-line description of the USB link: where ConfigFS is mounted, which
+     * UDC controllers exist, and what state each is in.
+     *
+     * The state is what separates "the gadget is bound" from "the host actually
+     * enumerated it": the app's own status check only proves the first, so a
+     * gadget that is up but invisible to the PC looks identical without it.
+     * `configured` means the host finished enumeration; anything else means the
+     * drive will not show up yet.
+     *
+     * Deliberately a single command producing a single line: runAsRootForChecking
+     * returns only the last non-empty line, so emitting two echo lines would
+     * silently drop the first one.
+     */
+    private suspend fun linkStatus(): String {
+        val out = runAsRootForChecking(
+            listOf(
+                "echo cfg=\$( [ -d /sys/kernel/config/usb_gadget ] && echo /sys/kernel/config" +
+                        " || { [ -d /config/usb_gadget ] && echo /config || echo none; } )" +
+                        " udc=\$(ls -1 /sys/class/udc 2>/dev/null | tr '\\n' ',')" +
+                        " state=\$(cat /sys/class/udc/*/state 2>/dev/null | tr '\\n' ',')"
+            )
+        ).trim()
+        return out.ifEmpty { "unknown" }
+    }
+
+    /**
      * Loads and executes as root a script from the assets folder
      * @param scriptName The name of the script file in assets/scripts/
      * @param args List of arguments to pass to the script
@@ -413,6 +493,7 @@ class RootManager(context: Context) {
      */
     private suspend fun runScriptAsRoot(scriptName: String, args: List<String> = emptyList()): String = withContext(Dispatchers.IO) {
         var output: String
+        val startedAt = SystemClock.elapsedRealtime()
         try {
             // Read the script content from assets
             val scriptContent = appContext.assets.open("scripts/$scriptName").bufferedReader().readText()
@@ -434,11 +515,16 @@ class RootManager(context: Context) {
             tempScript.writeText(fullContent)
             tempScript.setExecutable(true)
 
-            // Prepare arguments for the script. Every value is quoted
-            val argsString = args.joinToString(" ", postfix = " ") { shellQuote(it) }
+            // Keep the script path as its own argv[0]; joining it with a
+            // pre-quoted arg string would glue them together into one token.
+            val fullCommand = (listOf(tempScript.absolutePath) + args)
+                .joinToString(" ") { shellQuote(it) }
 
-            // Construct command to execute the temporary script with arguments
-            val fullCommand = shellQuote(tempScript.absolutePath) + argsString
+            IsoLog.d(
+                "script $scriptName: start ${scriptFingerprint(fullContent)} " +
+                        "args=${args.joinToString(prefix = "[", postfix = "]")} " +
+                        "rooted=$isRooted maxDevices=${getMaxDevices()}"
+            )
 
             val process = Runtime.getRuntime().exec(arrayOf("su", "-c", fullCommand))
 
@@ -461,12 +547,17 @@ class RootManager(context: Context) {
             }
 
             process.waitFor()
+            val exitCode = process.exitValue()
 
             // Clean up the temporary file
             tempScript.delete()
 
             output = outputBuilder.toString().trim()
+
+            IsoLog.d("script $scriptName: end exit=$exitCode tookMs=${SystemClock.elapsedRealtime() - startedAt}")
+            IsoLog.block("script $scriptName", output)
         } catch (e: Exception) {
+            IsoLog.e("script $scriptName: threw after ${SystemClock.elapsedRealtime() - startedAt}ms", e)
             e.printStackTrace()
             output = "Error: Could not execute script - ${e.message}"
         }
