@@ -45,6 +45,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -407,7 +408,8 @@ fun HomeScreen(
                                     // leaves the other LUNs serving.
                                     val action = snackbarHostState.showSnackbar(
                                         message = result.ifBlank { "Error: Could not eject item" },
-                                        actionLabel = "Force"
+                                        actionLabel = "Force",
+                                        duration = SnackbarDuration.Short
                                     )
                                     if (action == SnackbarResult.ActionPerformed) {
                                         val forceResult = rootManager.forceEjectItem(lunId)
