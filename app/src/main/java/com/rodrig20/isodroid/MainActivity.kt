@@ -71,6 +71,7 @@ import com.rodrig20.isodroid.data.SettingsRepository
 import com.rodrig20.isodroid.manager.RootManager
 import com.rodrig20.isodroid.models.DiskItem
 import com.rodrig20.isodroid.ui.theme.ISOdroidTheme
+import com.rodrig20.isodroid.util.IsoLog
 import com.rodrig20.isodroid.utils.getDisplayName
 import com.rodrig20.isodroid.utils.getRealPathFromTreeUri
 import com.rodrig20.isodroid.utils.getRealPathFromURI
@@ -125,12 +126,36 @@ class MainActivity : ComponentActivity() {
             WindowCompat.setDecorFitsSystemWindows(window, false)
         }
 
+        // Stamp the environment before the first root prompt, so the very first
+        // line of any bug report already says which build and kernel produced it.
+        logEnvironment(this)
+
         setContent {
             ISOdroidTheme {
                 App()
             }
         }
     }
+}
+
+/**
+ * Logs the app version and the kernel/ROM details that decide whether the USB
+ * gadget works at all. Everything here goes straight into a bug report, so a
+ * user only has to send `adb logcat` instead of being asked for each value.
+ *
+ * Called before the first root prompt, so it must not touch `su`.
+ */
+private fun logEnvironment(context: Context) {
+    val version = runCatching {
+        @Suppress("DEPRECATION")
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName
+    }.getOrNull() ?: "unknown"
+    IsoLog.i(
+        "ISOdroid version=$version sdk=${Build.VERSION.SDK_INT} " +
+                "release=${Build.VERSION.RELEASE} model=${Build.MODEL} " +
+                "device=${Build.DEVICE} brand=${Build.BRAND}"
+    )
+    IsoLog.i("firmware=${Build.FINGERPRINT}")
 }
 
 /**
@@ -191,6 +216,11 @@ fun App() {
         rootManager.setMaxDevicesProvider { maxDevices }
         rootManager.checkRoot()
         isRooted = rootManager.isRooted
+        IsoLog.i("root check: isRooted=${rootManager.isRooted}")
+        if (rootManager.isRooted) {
+            // Once root is granted, capture what makes a device work or not.
+            rootManager.logRootEnvironment()
+        }
         rootManager.initializeAppState()
         rootManager.getChargingState() // Initialize charging state
         isLoading = false
@@ -218,6 +248,7 @@ fun App() {
                 onAppEnabledChange = { enabled ->
                     // Handle app enable/disable actions
                     if (isToggling) return@HomeScreen
+                    IsoLog.i("user toggled gadget: enabled=$enabled")
                     isToggling = true
                     coroutineScope.launch {
                         try {
@@ -406,6 +437,7 @@ fun HomeScreen(
                                     // Host holds the LUN (PREVENT-ALLOW MEDIUM
                                     // REMOVAL): offer a per-LUN force eject that
                                     // leaves the other LUNs serving.
+                                    IsoLog.w("eject blocked on lun=$lunId for ${item.name}, offering force")
                                     val action = snackbarHostState.showSnackbar(
                                         message = result.ifBlank { "Error: Could not eject item" },
                                         actionLabel = "Force",
