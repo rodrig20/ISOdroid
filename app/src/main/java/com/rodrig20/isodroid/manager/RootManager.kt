@@ -14,6 +14,18 @@ import java.io.DataOutputStream
 import java.io.InputStreamReader
 
 /**
+ * Wraps a value so POSIX sh treats it as a single literal argument.
+ *
+ * Every root command goes through `su -c "<string>"`, so anything derived from
+ * a user-chosen file name (apostrophes are common: `Rock'n'Roll.iso`) would
+ * otherwise close the quoted string and run as root. Inside single quotes
+ * every character is literal, so an embedded quote must close the string,
+ * emit an escaped quote, and reopen: ' -> '"'"'
+ */
+private fun shellQuote(value: String): String =
+    "'" + value.replace("'", "'\"'\"'") + "'"
+
+/**
  * Root manager class that handles all operations requiring root access
  * Manages USB gadget configuration, mounting/ejecting items, and checking root status
  */
@@ -252,11 +264,11 @@ class RootManager(context: Context) {
     suspend fun deleteFile(path: String): String {
         if (!isRooted) return "Error: Device is not rooted"
         if (path.isBlank()) return "Error: Empty path"
-        val escaped = path.replace("'", "'\"'\"'")
+        val quoted = shellQuote(path)
         val result = runAsRootForChecking(
             listOf(
-                "rm -f '$escaped'",
-                "if [ -e '$escaped' ]; then echo FAILED; else echo DELETED; fi"
+                "rm -f $quoted",
+                "if [ -e $quoted ]; then echo FAILED; else echo DELETED; fi"
             )
         )
         return if (result.trim() == "DELETED") "Success" else "Error: Could not delete file"
@@ -422,15 +434,11 @@ class RootManager(context: Context) {
             tempScript.writeText(fullContent)
             tempScript.setExecutable(true)
 
-            // Prepare arguments for the script
-            val argsString = if (args.isNotEmpty()) {
-                args.joinToString(" ") { "'$it'" }
-            } else {
-                ""
-            }
+            // Prepare arguments for the script. Every value is quoted
+            val argsString = args.joinToString(" ", postfix = " ") { shellQuote(it) }
 
             // Construct command to execute the temporary script with arguments
-            val fullCommand = """${tempScript.absolutePath} $argsString"""
+            val fullCommand = shellQuote(tempScript.absolutePath) + argsString
 
             val process = Runtime.getRuntime().exec(arrayOf("su", "-c", fullCommand))
 
