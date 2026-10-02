@@ -17,7 +17,7 @@ ISOdroid is an Android app that turns your device into a bootable USB drive. Wit
 ## Requirements
 
 - **Device & Kernel**: Most modern AOSP kernels have ConfigFS mass storage support (`CONFIG_USB_CONFIGFS_MASS_STORAGE`) and a writable `/config/usb_gadget` or `/sys/kernel/config/usb_gadget`. It ships enabled (`=y`) in Android's Generic Kernel Image baseline.
-- **Root Access Methods**: Successfully tested with **Sukisu**, but should also work with **Magisk**, **KernelSU**, or other root solutions.
+- **Root Access Methods**: Works with the usual root solutions such as **Magisk**, **KernelSU**, or similar.
 
 ## How to Use
 
